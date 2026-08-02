@@ -1,5 +1,7 @@
 # Smart VAC Cleaner
 
+![Smart VAC Cleaner GUI](assets/screenshot.png)
+
 Portable, safe, modern junk cleaner for Windows. GUI + CLI + Task Scheduler.
 
 Safe by default: dry-run unless you say `--delete`. All candidate portable
@@ -46,6 +48,19 @@ Or install as a package (adds the `vac-cleaner` command):
 pip install .
 vac-cleaner --status
 ```
+
+No Python? Grab `SmartVACCleaner.exe` from the GitHub
+[Releases](https://github.com/vacterro/SMART-VAC-CLEANER/releases) tab —
+fully portable, config and logs live next to the exe.
+
+## Build the exe yourself
+
+```bat
+powershell -ExecutionPolicy Bypass -File build_exe.ps1
+```
+
+Produces `dist\SmartVACCleaner.exe` (PyInstaller onefile). On every
+`v*` tag, CI builds and uploads the exe as an artifact automatically.
 
 GUI:
 

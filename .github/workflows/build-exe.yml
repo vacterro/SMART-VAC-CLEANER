@@ -1,0 +1,33 @@
+name: Build EXE
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          pip install -r requirements.txt pyinstaller
+
+      - name: Build exe
+        run: |
+          python -m PyInstaller --onefile --console --clean --noconfirm --name SmartVACCleaner --collect-data customtkinter _SMART_VAC_CLEANER.py
+
+      - name: Smoke test
+        run: |
+          .\dist\SmartVACCleaner.exe --status | Select-Object -First 2
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SmartVACCleaner
+          path: dist/SmartVACCleaner.exe

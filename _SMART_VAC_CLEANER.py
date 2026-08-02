@@ -57,7 +57,7 @@ import customtkinter as ctk
 
 
 
-VERSION = "2.1.1"
+VERSION = "2.2.0"
 
 DEFAULT_THREADS = 12
 
@@ -79,7 +79,12 @@ BACKUP_ROOTS = [
 
 SCRIPT_PATH = Path(__file__).resolve()
 
-CONFIG_FILE = SCRIPT_PATH.parent / "cleaner_config.json"
+if getattr(sys, "frozen", False):
+    BASE_DIR = Path(sys.executable).resolve().parent
+else:
+    BASE_DIR = SCRIPT_PATH.parent
+
+CONFIG_FILE = BASE_DIR / "cleaner_config.json"
 
 
 MIN_PATH_PARTS = 5
@@ -433,7 +438,10 @@ class Logger:
 
         if log_file:
 
-            log_file.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                log_file.parent.mkdir(parents=True, exist_ok=True)
+            except OSError:
+                log_file = None  # exe in read-only dir: logs stay console-only
 
             try:
 
@@ -1657,6 +1665,8 @@ BLACKLIST_PATHS = {
 
     SCRIPT_PATH.parent,
 
+    BASE_DIR,
+
 }
 
 
@@ -2051,7 +2061,7 @@ class App(ctk.CTk):
 
     def _run_job(self):
         try:
-            log = Logger(SCRIPT_PATH.parent/"logs"/f"clean_{datetime.now().astimezone():%Y%m%d_%H%M%S}.log", False, gui_callback=self._log)
+            log = Logger(BASE_DIR/"logs"/f"clean_{datetime.now().astimezone():%Y%m%d_%H%M%S}.log", False, gui_callback=self._log)
             all_targets = {k: True for k in SYSTEM_TARGET_DEFAULTS}
             run_cleaning_job(False, True, True, True, log, DEFAULT_THREADS, all_targets, self.cancel_event, progress=self.progress)
         except CancelJobException:
@@ -2231,6 +2241,8 @@ TASK_NAME = "SmartVACCleaner"
 
 def scheduled_task_command() -> str:
     """Command line for the scheduled silent full-clean task."""
+    if getattr(sys, "frozen", False):
+        return f'"{sys.executable}" --cli --all --delete --hidden'
     pythonw = _get_pythonw()
     return f'"{pythonw}" "{SCRIPT_PATH}" --cli --all --delete --hidden'
 
@@ -2301,7 +2313,7 @@ def main():
             st = {k: True for k in SYSTEM_TARGET_DEFAULTS}
         ep = [p.strip() for p in args.exclude.split(",") if p.strip()]
         log = Logger(
-            SCRIPT_PATH.parent / "logs" / f"clean_{datetime.now().astimezone():%Y%m%d_%H%M%S}.log",
+            BASE_DIR / "logs" / f"clean_{datetime.now().astimezone():%Y%m%d_%H%M%S}.log",
             dry_run
         )
         run_cleaning_job(

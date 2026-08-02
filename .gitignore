@@ -9,3 +9,6 @@ cleaner_config.json
 venv/
 .freebuff/
 *.egg-info/
+build/
+dist/
+
