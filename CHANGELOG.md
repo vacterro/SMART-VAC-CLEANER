@@ -1,5 +1,10 @@
 # Changelog
 
+## v2.4.3
+- 11 new safe junk targets: Brave Cache/Code Cache/GPU Cache, Chrome + Edge Code Cache, CEF, Calibre, fontconfig, qBittorrent Logs, Claude CLI Cache, DaVinci Resolve Welcome Cache
+- Deep junk sweep: GitHub CLI `run-log-*.zip` cleanup (device-id/config untouched)
+- 3 new tests (80 total)
+
 ## v2.4.2
 - Window geometry persistence restored: size/position saved to `cleaner_config.json` on close, restored on start (`parse_geometry` clamps to 800x500 minimum)
 - `save_config()` now used by the GUI close path (was test-only)

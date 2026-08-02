@@ -57,7 +57,7 @@ import customtkinter as ctk
 
 
 
-VERSION = "2.4.2"
+VERSION = "2.4.3"
 
 DEFAULT_THREADS = 12
 
@@ -314,6 +314,20 @@ USER_APPDATA_TARGETS.extend([
     (get_env_path("LOCALAPPDATA", r"C:\Temp") / "ollama app.exe" / "EBWebView" / "Default" / "Cache", "Ollama WebView Cache"),
     (get_env_path("APPDATA", r"C:\ProgramData") / "MaxonApp" / "UserData" / "EBWebView" / "Default" / "Cache", "Maxon WebView Cache"),
     (get_env_path("APPDATA", r"C:\ProgramData") / "Photoshop1-25-WIN" / "EBWebView" / "Default" / "Cache", "Photoshop WebView Cache"),
+    # Brave browser (LocalAppData)
+    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "BraveSoftware" / "Brave-Browser" / "User Data" / "Default" / "Cache", "Brave Cache"),
+    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "BraveSoftware" / "Brave-Browser" / "User Data" / "Default" / "Code Cache", "Brave Code Cache"),
+    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "BraveSoftware" / "Brave-Browser" / "User Data" / "Default" / "GPUCache", "Brave GPU Cache"),
+    # Code Cache for Chrome/Edge (Cache already covered)
+    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "Google" / "Chrome" / "User Data" / "Default" / "Code Cache", "Chrome Code Cache"),
+    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "Microsoft" / "Edge" / "User Data" / "Default" / "Code Cache", "Edge Code Cache"),
+    # misc safe caches / logs
+    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "CEF", "CEF Cache"),
+    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "calibre-cache", "Calibre Cache"),
+    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "fontconfig", "fontconfig Cache"),
+    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "qBittorrent" / "logs", "qBittorrent Logs"),
+    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "claude-cli-nodejs" / "Cache", "Claude CLI Cache"),
+    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "DaVinci Resolve Welcome", "Resolve Welcome Cache"),
 ])
 
 
@@ -1602,6 +1616,22 @@ class SystemCleaner(CleanerEngine):
         if odis_log.is_file() and self.guard.is_safe(odis_log)[0]:
 
             freed += self._del_file(odis_log, f"Autodesk ODIS log: {odis_log.name}")
+
+        # GitHub CLI run-log zips (cache dir only; device-id/config stay)
+
+        try:
+
+            for f in (loc / "GitHub CLI").glob("run-log-*.zip"):
+
+                self.check_cancel()
+
+                if self.guard.is_safe(f)[0]:
+
+                    freed += self._del_file(f, f"GitHub CLI run-log: {f.name}")
+
+        except OSError:
+
+            pass
 
         return freed
 

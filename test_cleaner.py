@@ -117,6 +117,27 @@ class TestConfigPersistence(unittest.TestCase):
         self.assertEqual(vac.parse_geometry("400x300+0+0"), "800x500+0+0")
 
 
+class TestUserAppdataTargets(unittest.TestCase):
+
+    def test_new_safe_targets_present(self):
+        names = [d for _, d in vac.USER_APPDATA_TARGETS]
+        for expected in ["Brave Cache", "Brave Code Cache", "Brave GPU Cache",
+                         "Chrome Code Cache", "Edge Code Cache", "CEF Cache",
+                         "Calibre Cache", "fontconfig Cache", "qBittorrent Logs",
+                         "Claude CLI Cache", "Resolve Welcome Cache"]:
+            self.assertIn(expected, names)
+
+    def test_targets_are_path_desc_pairs(self):
+        for p, d in vac.USER_APPDATA_TARGETS:
+            self.assertIsInstance(p, Path)
+            self.assertIsInstance(d, str)
+            self.assertTrue(d)
+
+    def test_targets_no_duplicate_paths(self):
+        paths = [str(p.resolve()) for p, _ in vac.USER_APPDATA_TARGETS]
+        self.assertEqual(len(paths), len(set(paths)))
+
+
 class TestSafetyGuard(unittest.TestCase):
 
     def setUp(self):
