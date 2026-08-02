@@ -1,2 +1,0 @@
-[console_scripts]
-vac-cleaner = _SMART_VAC_CLEANER:main
