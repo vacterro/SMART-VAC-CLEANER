@@ -57,7 +57,7 @@ import customtkinter as ctk
 
 
 
-VERSION = "2.3.1"
+VERSION = "2.4.0"
 
 DEFAULT_THREADS = 12
 
@@ -85,6 +85,43 @@ else:
     BASE_DIR = SCRIPT_PATH.parent
 
 CONFIG_FILE = BASE_DIR / "cleaner_config.json"
+
+STRINGS_DIR = BASE_DIR / "strings"
+
+DEFAULT_STRINGS: dict[str, str] = {
+    "clean": "Clean",
+    "stop": "Stop",
+    "find_new_junk": "Find New Junk",
+    "install_task": "Install Auto-Clean Task",
+    "window_title": "Smart VAC Cleaner",
+    "confirm_title": "Confirm DELETE",
+    "confirm_body": "Files will be permanently removed (no recycle bin).\n\nContinue?",
+    "junk_window_title": "Find New Junk",
+    "scanning": "Scanning...",
+    "nothing_found": "Nothing new found.",
+    "cancelled": "Cancelled.",
+    "cancelling": "Cancelling...",
+    "task_dialog_title": "Auto-Clean Task",
+    "task_dialog_prompt": "Daily start time (HH:MM):",
+}
+
+
+def load_strings(lang: str) -> dict[str, str]:
+    strings = dict(DEFAULT_STRINGS)
+    candidates = [STRINGS_DIR]
+    if getattr(sys, "frozen", False):
+        candidates.append(Path(getattr(sys, "_MEIPASS", STRINGS_DIR)) / "strings")
+    for base in candidates:
+        path = base / f"{lang}.json"
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                strings.update({k: v for k, v in data.items() if isinstance(v, str)})
+                break
+        except (OSError, ValueError):
+            continue
+    return strings
 
 
 MIN_PATH_PARTS = 5
@@ -1772,6 +1809,8 @@ def load_config() -> dict:
 
         "auto_clean_interval_hours": 0,
 
+        "lang": "en",
+
         "portable_roots": [str(PRIMARY_ROOT.resolve())] + [str(b.resolve()) for b in BACKUP_ROOTS]
 
     }
@@ -2056,7 +2095,9 @@ BEVEL_SUNKEN = WIN95_BEVEL_SH   # border on sunken/entry controls
 class App(ctk.CTk):
     def __init__(self):
         super().__init__()
-        self.title(f"Smart VAC Cleaner v{VERSION}")
+        self.config = load_config()
+        self.T = load_strings(self.config.get("lang", "en"))
+        self.title(f"{self.T['window_title']} v{VERSION}")
         self.geometry("960x640")
         self.minsize(800, 500)
         self.configure(fg_color=WIN95_BG)
@@ -2085,16 +2126,16 @@ class App(ctk.CTk):
         row = 0
         ctk.CTkLabel(side, text=f"VAC CLEANER v{VERSION}", font=("Verdana", 14, "bold"), text_color=WIN95_TEXT).grid(row=row, column=0, pady=(14, 4), padx=8)
         row += 1
-        self.btn_clean = ctk.CTkButton(side, text="Clean", font=("Verdana", 12, "bold"), fg_color=WIN95_BUTTON, hover_color=WIN95_BUTTON_HOVER, text_color=WIN95_DANGER, corner_radius=Z, height=34, border_width=2, border_color=BEVEL_RAISED, command=lambda: self._start_job())
+        self.btn_clean = ctk.CTkButton(side, text=self.T["clean"], font=("Verdana", 12, "bold"), fg_color=WIN95_BUTTON, hover_color=WIN95_BUTTON_HOVER, text_color=WIN95_DANGER, corner_radius=Z, height=34, border_width=2, border_color=BEVEL_RAISED, command=lambda: self._start_job())
         self.btn_clean.grid(row=row, column=0, pady=(16, 6), padx=10, sticky="ew")
         row += 1
-        self.btn_stop = ctk.CTkButton(side, text="Stop", font=native_font, fg_color=WIN95_BUTTON, hover_color=WIN95_BUTTON_HOVER, text_color=WIN95_TEXT, text_color_disabled=WIN95_TEXT_MUTED, corner_radius=Z, height=30, border_width=2, border_color=BEVEL_RAISED, command=self._cancel_job, state="disabled")
+        self.btn_stop = ctk.CTkButton(side, text=self.T["stop"], font=native_font, fg_color=WIN95_BUTTON, hover_color=WIN95_BUTTON_HOVER, text_color=WIN95_TEXT, text_color_disabled=WIN95_TEXT_MUTED, corner_radius=Z, height=30, border_width=2, border_color=BEVEL_RAISED, command=self._cancel_job, state="disabled")
         self.btn_stop.grid(row=row, column=0, pady=4, padx=10, sticky="ew")
         row += 1
-        self.btn_junk = ctk.CTkButton(side, text="Find New Junk", font=native_font, fg_color=WIN95_BUTTON, hover_color=WIN95_BUTTON_HOVER, text_color=WIN95_TEXT, corner_radius=Z, border_width=2, border_color=BEVEL_RAISED, command=self._open_junk_scanner)
+        self.btn_junk = ctk.CTkButton(side, text=self.T["find_new_junk"], font=native_font, fg_color=WIN95_BUTTON, hover_color=WIN95_BUTTON_HOVER, text_color=WIN95_TEXT, corner_radius=Z, border_width=2, border_color=BEVEL_RAISED, command=self._open_junk_scanner)
         self.btn_junk.grid(row=row, column=0, pady=4, padx=10, sticky="ew")
         row += 1
-        self.btn_task = ctk.CTkButton(side, text="Install Auto-Clean Task", font=native_font, fg_color=WIN95_BUTTON, hover_color=WIN95_BUTTON_HOVER, text_color=WIN95_ACCENT, corner_radius=Z, border_width=2, border_color=BEVEL_RAISED, command=self._install_scheduled_task)
+        self.btn_task = ctk.CTkButton(side, text=self.T["install_task"], font=native_font, fg_color=WIN95_BUTTON, hover_color=WIN95_BUTTON_HOVER, text_color=WIN95_ACCENT, corner_radius=Z, border_width=2, border_color=BEVEL_RAISED, command=self._install_scheduled_task)
         self.btn_task.grid(row=row, column=0, pady=4, padx=10, sticky="ew")
         self.main_frame = ctk.CTkFrame(self, fg_color=WIN95_BG, corner_radius=Z)
         self.main_frame.grid(row=0, column=1, sticky="nsew", padx=(4,4), pady=4)
@@ -2135,8 +2176,8 @@ class App(ctk.CTk):
     def _start_job(self):
         if self._clean_in_progress: return
         if not messagebox.askyesno(
-                "Confirm DELETE",
-                "Files will be permanently removed (no recycle bin).\n\nContinue?",
+                self.T["confirm_title"],
+                self.T["confirm_body"],
                 parent=self, icon="warning", default="no"):
             return
         self._rebuild_cat_bars()
@@ -2157,7 +2198,7 @@ class App(ctk.CTk):
             all_targets = {k: True for k in SYSTEM_TARGET_DEFAULTS}
             run_cleaning_job(False, True, True, True, log, DEFAULT_THREADS, all_targets, self.cancel_event, progress=self.progress)
         except CancelJobException:
-            self._log("Cancelled.")
+            self._log(self.T["cancelled"])
         except Exception as e:
             self._log(f"Error: {e}")
         finally:
@@ -2172,7 +2213,7 @@ class App(ctk.CTk):
 
     def _cancel_job(self):
         self.cancel_event.set()
-        self._log("Cancelling...")
+        self._log(self.T["cancelling"])
 
     def _log(self, m):
         self.log_queue.put(m)
@@ -2262,13 +2303,13 @@ class App(ctk.CTk):
             d.line([8, 4, 8, 12], fill=(200, 168, 78))
             def on_cl(ic, it): ic.stop(); self.after(0, self._start_job)
             def on_ex(ic, it): ic.stop(); self.after(0, self._full_exit)
-            self._tray_icon = pystray.Icon("vac_cleaner", img, "VAC", pystray.Menu(pystray.MenuItem("Clean", on_cl), pystray.MenuItem("Exit", on_ex)))
+            self._tray_icon = pystray.Icon("vac_cleaner", img, "VAC", pystray.Menu(pystray.MenuItem(self.T["clean"], on_cl), pystray.MenuItem("Exit", on_ex)))
             self._tray_icon.run_detached()
         except Exception:
             pass
 
     def _install_scheduled_task(self):
-        start = simpledialog.askstring("Auto-Clean Task", "Daily start time (HH:MM):", initialvalue="09:00", parent=self)
+        start = simpledialog.askstring(self.T["task_dialog_title"], self.T["task_dialog_prompt"], initialvalue="09:00", parent=self)
         if not start:
             return
         hh, mm = start.split(":")
@@ -2278,10 +2319,10 @@ class App(ctk.CTk):
 
     def _open_junk_scanner(self):
         win = ctk.CTkToplevel(self)
-        win.title("Find New Junk")
+        win.title(self.T["junk_window_title"])
         win.geometry("600x400")
         win.configure(fg_color=WIN95_BG)
-        lbl = ctk.CTkLabel(win, text="Scanning...", font=native_font, text_color=WIN95_TEXT)
+        lbl = ctk.CTkLabel(win, text=self.T["scanning"], font=native_font, text_color=WIN95_TEXT)
         lbl.pack(pady=10)
         results = []
         def scan():
@@ -2302,7 +2343,7 @@ class App(ctk.CTk):
         f = ctk.CTkScrollableFrame(win, fg_color=WIN95_BG_SOFT)
         f.pack(fill="both", expand=True, padx=10, pady=5)
         if not results:
-            ctk.CTkLabel(f, text="Nothing new found.", font=native_font, text_color=WIN95_TEXT).pack(pady=20)
+            ctk.CTkLabel(f, text=self.T["nothing_found"], font=native_font, text_color=WIN95_TEXT).pack(pady=20)
             return
         for item, _, sz in results:
             r = ctk.CTkFrame(f, fg_color="transparent")

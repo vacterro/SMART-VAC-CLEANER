@@ -60,6 +60,7 @@ class TestConfigPersistence(unittest.TestCase):
         result = vac.load_config()
         self.assertIn("custom_rules", result)
         self.assertIn("portable_roots", result)
+        self.assertIn("lang", result)
 
     def test_load_creates_config_file(self):
         vac.load_config()
@@ -565,6 +566,37 @@ class TestCLIFunctions(unittest.TestCase):
             vac.main()
             mock_hide.assert_called_once()
             self.assertTrue(mock_job.called)
+
+
+class TestI18n(unittest.TestCase):
+
+    def setUp(self):
+        self.tmp_dir = tempfile.TemporaryDirectory()
+        self.tmp_strings = Path(self.tmp_dir.name) / "strings"
+        self.tmp_strings.mkdir()
+        (self.tmp_strings / "ru.json").write_text(
+            '{"clean": "Очистить", "stop": "Стоп"}', encoding="utf-8")
+        self.cm = patch.object(vac, "STRINGS_DIR", self.tmp_strings)
+        self.cm.start()
+
+    def tearDown(self):
+        self.cm.stop()
+        self.tmp_dir.cleanup()
+
+    def test_unknown_lang_falls_back_to_english(self):
+        s = vac.load_strings("xx")
+        self.assertEqual(s["clean"], "Clean")
+        self.assertEqual(s["confirm_title"], "Confirm DELETE")
+
+    def test_translated_lang_overrides(self):
+        s = vac.load_strings("ru")
+        self.assertEqual(s["clean"], "Очистить")
+        self.assertEqual(s["stop"], "Стоп")
+        self.assertEqual(s["find_new_junk"], "Find New Junk")
+
+    def test_missing_file_falls_back_to_english(self):
+        s = vac.load_strings("et")
+        self.assertEqual(s["clean"], "Clean")
 
 
 if __name__ == "__main__":

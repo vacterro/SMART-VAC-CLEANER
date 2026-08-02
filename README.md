@@ -141,13 +141,15 @@ Example:
   "custom_rules": [{"path": "D:\\Apps\\TestApp", "pattern": "*.log"}],
   "exclude_patterns": ["*.db"],
   "exclude_paths": ["C:\\Users\\me\\AppData\\Local\\Important"],
-  "auto_clean_interval_hours": 0
+  "auto_clean_interval_hours": 0,
+  "lang": "en"
 }
 ```
 
 - `portable_roots`: folders whose known-junk subfolders are swept (pattern-based, e.g. `Cache`, `Temp`, `Logs`, numbered backups). Anything not matching junk patterns is untouched.
 - `custom_rules`: `path` (folder) + `pattern` (glob, `*` = whole contents).
 - `exclude_patterns` / `exclude_paths`: extra no-go lists.
+- `lang`: GUI language — `en` (default), `ru`, `et`. Built-in `strings/*.json` live next to the script (or bundled into the exe); drop your own `<lang>.json` there to add a language.
 
 ## Tests
 

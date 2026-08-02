@@ -1,5 +1,10 @@
 # Changelog
 
+## v2.4.0
+- GUI i18n: config `lang` key (`en`/`ru`/`et`), `load_strings()` with English fallback, all GUI strings (buttons, dialogs, junk scanner, tray menu) localizable via `strings/<lang>.json`
+- Exe bundles `strings/` (PyInstaller datas); frozen builds also check `BASE_DIR/strings` next to the exe
+- 3 new i18n tests (71 total)
+
 ## v2.3.1
 - i18n: full README translations — Russian (`README.ru.md`), Estonian (`README.et.md`) — with language switcher in README
 - docs: release table of contents (this file)

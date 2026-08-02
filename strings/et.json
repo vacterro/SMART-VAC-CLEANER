@@ -1,0 +1,16 @@
+{
+  "clean": "Puhasta",
+  "stop": "Peata",
+  "find_new_junk": "Leia uus prügi",
+  "install_task": "Paigalda autopuhastuse ülesanne",
+  "window_title": "Smart VAC Cleaner",
+  "confirm_title": "Kinnita KUSTUTAMINE",
+  "confirm_body": "Failid kustutatakse jäädavalt (ilma prügikastita).\n\nJätkata?",
+  "junk_window_title": "Uue prügi otsing",
+  "scanning": "Otsitakse...",
+  "nothing_found": "Midagi uut ei leitud.",
+  "cancelled": "Katkestatud.",
+  "cancelling": "Katkestamine...",
+  "task_dialog_title": "Autopuhastuse ülesanne",
+  "task_dialog_prompt": "Igapäevase käivituse kellaaeg (HH:MM):"
+}

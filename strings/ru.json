@@ -1,0 +1,16 @@
+{
+  "clean": "Очистить",
+  "stop": "Стоп",
+  "find_new_junk": "Найти новый мусор",
+  "install_task": "Установить задачу автоочистки",
+  "window_title": "Smart VAC Cleaner",
+  "confirm_title": "Подтвердить УДАЛЕНИЕ",
+  "confirm_body": "Файлы будут удалены навсегда (без корзины).\n\nПродолжить?",
+  "junk_window_title": "Поиск нового мусора",
+  "scanning": "Сканирование...",
+  "nothing_found": "Ничего нового не найдено.",
+  "cancelled": "Отменено.",
+  "cancelling": "Отмена...",
+  "task_dialog_title": "Задача автоочистки",
+  "task_dialog_prompt": "Время ежедневного запуска (ЧЧ:ММ):"
+}
