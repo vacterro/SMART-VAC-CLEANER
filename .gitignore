@@ -8,3 +8,4 @@ cleaner_config.json
 .venv/
 venv/
 .freebuff/
+*.egg-info/
