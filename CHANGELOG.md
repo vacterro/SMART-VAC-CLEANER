@@ -1,5 +1,9 @@
 # Changelog
 
+## v2.4.1
+- Docs refresh: wiki pages updated for v2.4.0 (lang config key, 71 tests, strings bundle) — `docs/` synced from saiwiki payload
+- Translations: `lang` config key documented in README.ru.md / README.et.md
+
 ## v2.4.0
 - GUI i18n: config `lang` key (`en`/`ru`/`et`), `load_strings()` with English fallback, all GUI strings (buttons, dialogs, junk scanner, tray menu) localizable via `strings/<lang>.json`
 - Exe bundles `strings/` (PyInstaller datas); frozen builds also check `BASE_DIR/strings` next to the exe

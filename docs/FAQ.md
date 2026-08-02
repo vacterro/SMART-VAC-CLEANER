@@ -38,3 +38,7 @@ A: `python _SMART_VAC_CLEANER.py --cli --all` (dry-run preview), or
 
 **Q: Can I clean on a schedule without a task?**
 A: Yes — GUI has `auto_clean_interval_hours` in config (0 = off).
+
+**Q: How do I change the GUI language?**
+A: Set `"lang": "ru"` or `"et"` in `cleaner_config.json` and restart the GUI.
+Missing strings fall back to English.

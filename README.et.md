@@ -140,12 +140,14 @@ Näide:
   "exclude_patterns": ["*.db"],
   "exclude_paths": ["C:\\Users\\me\\AppData\\Local\\Important"],
   "auto_clean_interval_hours": 0
+  "lang": "en"
 }
 ```
 
 - `portable_roots`: kaustad, mille tuntud prügialamkaustad pühitakse (nt `Cache`, `Temp`, `Logs`, nummerdatud varukoopiad). Kõik, mis prügimustritele ei sobi, jääb puutumata.
 - `custom_rules`: `path` (kaust) + `pattern` (glob, `*` = kogu sisu).
 - `exclude_patterns` / `exclude_paths`: täiendavad keelatud nimekirjad.
+- `lang`: liidese keel — `en` (vaikimisi), `ru`, `et`. Sisseehitatud `strings/*.json` asuvad skripti kõrval (või on exe sisse pakitud); oma keele lisamiseks pane sinna `<lang>.json`.
 
 ## Testid
 

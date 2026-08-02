@@ -140,12 +140,14 @@ schtasks /Delete /TN SmartVACCleaner /F
   "exclude_patterns": ["*.db"],
   "exclude_paths": ["C:\\Users\\me\\AppData\\Local\\Important"],
   "auto_clean_interval_hours": 0
+  "lang": "en"
 }
 ```
 
 - `portable_roots`: папки, чьи известные мусорные подпапки выметаются (например, `Cache`, `Temp`, `Logs`, нумерованные резервные копии). Всё, что не подходит под мусорные паттерны, не трогается.
 - `custom_rules`: `path` (папка) + `pattern` (glob, `*` = всё содержимое).
 - `exclude_patterns` / `exclude_paths`: дополнительные запретные списки.
+- `lang`: язык интерфейса — `en` (по умолчанию), `ru`, `et`. Встроенные `strings/*.json` лежат рядом со скриптом (или вшиты в exe); добавьте свой `<lang>.json`, чтобы добавить язык.
 
 ## Тесты
 
