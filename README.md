@@ -20,7 +20,7 @@ Missing drives are silently skipped, never errors.
 
 ## Safety (defense in depth)
 
-- **Dry-run by default** — GUI "Clean" is real delete, but the CLI needs `--delete` explicitly
+- **Dry-run by default** — GUI "Clean" is real delete (with a confirm dialog), the CLI needs `--delete` explicitly
 - **Blacklist**: `C:\`, `C:\Windows`, `USERPROFILE`, Program Files, the script's own folder — never touched, even by custom rules
 - **Min path depth**: shallow paths (fewer than 5 parts) are refused
 - **Running-process check**: apps using a target are skipped (per-app process lists)
@@ -62,34 +62,54 @@ powershell -ExecutionPolicy Bypass -File build_exe.ps1
 Produces `dist\SmartVACCleaner.exe` (PyInstaller onefile). On every
 `v*` tag, CI builds and uploads the exe as an artifact automatically.
 
-GUI:
+## GUI
 
 ```bat
 python _SMART_VAC_CLEANER.py
 ```
 
-CLI (preview only):
+Four buttons: **Clean** (real delete — asks for confirmation first), **Stop**,
+**Find New Junk** (scans AppData for new junk candidates), **Install Auto-Clean
+Task**. Progress bars per category, full log window; every run also lands in
+`logs\clean_*.log`.
+
+## CLI
+
+The CLI is **dry-run by default** — it only reports what would be deleted.
+Add `--delete` to actually remove files. `--dry-run` forces preview even when
+`--delete` is present.
+
+| Flag | Effect |
+|---|---|
+| `--cli` | Force console mode |
+| `--portable` / `--system` / `--custom` | Select cleaning layers (default: dry-run preview) |
+| `--all` | All layers at once |
+| `--delete` | **Real delete** (without it the run is a dry-run preview) |
+| `--dry-run` | Force preview even with `--delete` |
+| `--status` | Show how much junk exists per target; nothing is deleted |
+| `--sys-targets` | Comma list of system targets to force-enable (`System Temp`, `User Temp`, ...) |
+| `--exclude` | Comma list of extra exclude patterns (`--exclude "*.db,*.tmp"`) |
+| `--hidden` | Hide console window (used by Task Scheduler) |
+| `--install-task` | Register the daily silent full-clean task |
+| `--time HH:MM` | Start time for the scheduled task (default `09:00`) |
+
+Examples:
 
 ```bat
-python _SMART_VAC_CLEANER.py --cli --portable --system --custom
-```
+REM preview everything
+python _SMART_VAC_CLEANER.py --cli --all
 
-CLI (real delete, all layers):
-
-```bat
+REM actually delete everything
 python _SMART_VAC_CLEANER.py --cli --all --delete
+
+REM preview, then real delete, dry-run flag always wins
+python _SMART_VAC_CLEANER.py --cli --all --delete --dry-run
 ```
 
 Inspect what would be cleaned:
 
 ```bat
 python _SMART_VAC_CLEANER.py --status
-```
-
-Find new junk candidates in AppData:
-
-```bat
-python _SMART_VAC_CLEANER.py --find-junk
 ```
 
 ### Automated cleanup (Task Scheduler)
@@ -106,7 +126,11 @@ schtasks /Delete /TN SmartVACCleaner /F
 
 ## Configuration
 
-`cleaner_config.json` is auto-created on first save / not required to run.
+`cleaner_config.json` is auto-created next to the script (or next to the exe)
+on first run, with defaults. All paths in it are canonicalized on load:
+slash style, trailing separators and `..` segments are normalized, duplicate
+roots collapse, protected paths (`C:\`, Windows, Program Files, user profile,
+the cleaner's own folder) and nested roots are rejected with a warning.
 Example:
 
 ```json
