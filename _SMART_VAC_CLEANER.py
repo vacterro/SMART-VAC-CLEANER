@@ -57,7 +57,7 @@ import customtkinter as ctk
 
 
 
-VERSION = "2.2.0"
+VERSION = "2.3.0"
 
 DEFAULT_THREADS = 12
 
@@ -1700,6 +1700,66 @@ def is_path_blacklisted(p: Path) -> bool:
     return False
 
 
+_CONTROL_CHARS = frozenset(chr(i) for i in range(32) if chr(i) not in "\t\n\r")
+
+
+def normalize_path(raw, require_absolute: bool = True) -> Path | None:
+    """Canonicalize a user-supplied path. Fixes slash style, trailing separators,
+    dot segments, quotes, duplicates, expands %ENV% vars. Returns None for garbage.
+
+    The canonical (resolved) form is what everything downstream compares against,
+    so 'D:\\Portable\\..\\Portable\\' and 'D:/Portable' become one identical path.
+    """
+    if not raw or not isinstance(raw, str):
+        return None
+    raw = raw.strip().strip('"').strip()
+    if not raw:
+        return None
+    if any(c in _CONTROL_CHARS for c in raw):
+        return None
+    expanded = os.path.expandvars(raw)
+    if require_absolute and not os.path.isabs(expanded):
+        return None
+    try:
+        return Path(expanded).resolve()
+    except OSError:
+        return Path(expanded).absolute()
+
+
+def _is_ancestor(a: Path, b: Path) -> bool:
+    try:
+        b.relative_to(a)
+        return True
+    except ValueError:
+        return False
+
+
+def sanitize_roots(raw_roots) -> tuple[list[str], list[str]]:
+    """Canonicalize, dedupe, and reject unsafe portable roots.
+
+    Returns (valid_canonical_paths, rejected_reasons). Layers: canonical form,
+    blacklist, duplicates, nested-inside-another-root.
+    """
+    valid: list[Path] = []
+    rejected: list[str] = []
+    for raw in raw_roots or []:
+        p = normalize_path(raw)
+        if p is None:
+            rejected.append(f"{raw!r}: invalid or relative path")
+            continue
+        if is_path_blacklisted(p):
+            rejected.append(f"{p}: protected (blacklisted) path")
+            continue
+        if p in valid:
+            continue  # already canonicalized -> duplicates collapse here
+        nested_in = next((v for v in valid if _is_ancestor(p, v) or _is_ancestor(v, p)), None)
+        if nested_in is not None:
+            rejected.append(f"{p}: nested inside another configured root {nested_in}")
+            continue
+        valid.append(p)
+    return [str(p) for p in valid], rejected
+
+
 def load_config() -> dict:
 
     default_cfg = {
@@ -1753,6 +1813,38 @@ def load_config() -> dict:
             if "portable_roots" not in data:
 
                 data["portable_roots"] = default_cfg["portable_roots"]
+
+            roots, root_rejects = sanitize_roots(data.get("portable_roots", []))
+
+            data["portable_roots"] = roots
+
+            for r in root_rejects:
+
+                logging.getLogger("vac_cleaner").warning(f"Portable root rejected: {r}")
+
+            rules = []
+
+            for rule in data.get("custom_rules", []):
+
+                p = normalize_path(rule.get("path", ""))
+
+                if p is None:
+
+                    logging.getLogger("vac_cleaner").warning(f"Custom rule dropped (invalid path): {rule.get('path')!r}")
+
+                    continue
+
+                if is_path_blacklisted(p):
+
+                    logging.getLogger("vac_cleaner").warning(f"Custom rule dropped (protected path): {p}")
+
+                    continue
+
+                rules.append({**rule, "path": str(p)})
+
+            data["custom_rules"] = rules
+
+            data["exclude_paths"] = [str(p) for p in (normalize_path(ep) for ep in data.get("exclude_paths", [])) if p is not None]
 
             return data
 

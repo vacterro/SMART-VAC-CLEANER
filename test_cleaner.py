@@ -66,7 +66,7 @@ class TestConfigPersistence(unittest.TestCase):
         self.assertTrue(self.tmp_config.exists())
 
     def test_save_and_load_roundtrip(self):
-        data = {"custom_rules": [{"path": "/tmp", "pattern": "*.log"}]}
+        data = {"custom_rules": [{"path": "C:\\Users\\nobody\\AppData\\Local\\Temp\\app", "pattern": "*.log"}]}
         vac.save_config(data)
         loaded = vac.load_config()
         self.assertEqual(loaded["custom_rules"], data["custom_rules"])
@@ -386,6 +386,76 @@ class TestPortableSweep(unittest.TestCase):
             cleaner._clean_chromium_profile(profile, "chromium")
             self.assertFalse((profile / "Cache").exists())
             self.assertTrue((profile / "Login Data").exists())
+
+
+class TestPathHardening(unittest.TestCase):
+    """Tests for path normalization / anti-drift layers."""
+
+    def test_slash_style_unified(self):
+        self.assertEqual(
+            str(vac.normalize_path(r"C:\Users\me\AppData\Local\Cache")),
+            str(vac.normalize_path("C:/Users/me/AppData/Local/Cache/")))
+
+    def test_dot_segments_collapsed(self):
+        self.assertEqual(
+            str(vac.normalize_path(r"C:\Users\me\AppData\..\AppData\Local")),
+            str(vac.normalize_path(r"C:\Users\me\AppData\Local")))
+
+    def test_trailing_separator_collapsed(self):
+        self.assertEqual(
+            str(vac.normalize_path("C:\\Tools\\Portable\\")),
+            str(vac.normalize_path(r"C:\Tools\Portable")))
+
+    def test_env_var_expansion(self):
+        self.assertEqual(
+            str(vac.normalize_path(r"%LOCALAPPDATA%\Cache")),
+            str(vac.normalize_path(os.environ.get("LOCALAPPDATA", r"C:\nope") + r"\Cache")))
+
+    def test_quotes_stripped(self):
+        self.assertEqual(
+            str(vac.normalize_path('"D:\\Apps\\X"')),
+            str(vac.normalize_path("D:\\Apps\\X")))
+
+    def test_relative_rejected(self):
+        self.assertIsNone(vac.normalize_path("Portable\\Cache"))
+
+    def test_empty_and_garbage_rejected(self):
+        self.assertIsNone(vac.normalize_path(""))
+        self.assertIsNone(vac.normalize_path('   '))
+        self.assertIsNone(vac.normalize_path("D:\\bad\x01path"))
+
+    def test_roots_dedupe(self):
+        valid, rejected = vac.sanitize_roots([
+            "D:\\Portable\\", "D:/Portable", r"D:\Portable\..\Portable", "D:\\Other"])
+        self.assertEqual(valid, [str(vac.normalize_path("D:\\Portable")), str(vac.normalize_path("D:\\Other"))])
+        self.assertEqual(rejected, [])
+
+    def test_roots_nested_rejected(self):
+        valid, rejected = vac.sanitize_roots(["D:\\Apps", "D:\\Apps\\Extra"])
+        self.assertEqual(len(valid), 1)
+        self.assertTrue(any("nested" in r for r in rejected))
+
+    def test_roots_blacklisted_rejected(self):
+        valid, rejected = vac.sanitize_roots([os.environ.get("windir", r"C:\Windows"), "D:\\Clean"])
+        self.assertEqual(valid, [str(vac.normalize_path("D:\\Clean"))])
+        self.assertTrue(any("blacklisted" in r for r in rejected))
+
+    def test_load_config_normalizes_user_paths(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = Path(tmp) / "cleaner_config.json"
+            cfg.write_text(json.dumps({
+                "portable_roots": ["D:\\Portable\\", "D:/Portable"],
+                "custom_rules": [{"path": "C:\\Windows\\System32", "pattern": "*"},
+                                 {"path": r"D:\App\Logs", "pattern": "*.log"}],
+                "exclude_paths": ["D:\\Keep\\"],
+            }), encoding="utf-8")
+            with patch.object(vac, "CONFIG_FILE", cfg):
+                data = vac.load_config()
+                self.assertEqual(len(data["portable_roots"]), 1)  # deduped
+                self.assertEqual(data["portable_roots"], [str(vac.normalize_path(r"D:\Portable"))])
+                self.assertEqual(len(data["custom_rules"]), 1)  # Windows rule dropped
+                self.assertEqual(data["custom_rules"][0]["path"], str(vac.normalize_path(r"D:\App\Logs")))
+                self.assertEqual(data["exclude_paths"], [str(vac.normalize_path(r"D:\Keep"))])
 
 
 class TestCLIFunctions(unittest.TestCase):
