@@ -57,7 +57,7 @@ import customtkinter as ctk
 
 
 
-VERSION = "2.4.1"
+VERSION = "2.4.2"
 
 DEFAULT_THREADS = 12
 
@@ -1811,6 +1811,8 @@ def load_config() -> dict:
 
         "lang": "en",
 
+        "window_geometry": "",
+
         "portable_roots": [str(PRIMARY_ROOT.resolve())] + [str(b.resolve()) for b in BACKUP_ROOTS]
 
     }
@@ -1892,6 +1894,18 @@ def load_config() -> dict:
         logging.getLogger("vac_cleaner").warning(f"Config file corrupted or unreadable: {CONFIG_FILE} - falling back to defaults")
 
         return default_cfg
+
+
+def parse_geometry(geom: str, default: str = "960x640", min_w: int = 800, min_h: int = 500) -> str:
+    """Validate a Tk geometry string "WxH+X+Y" and clamp it to the minimums."""
+    geom = (geom or "").strip()
+    if not geom:
+        return default
+    m = re.fullmatch(r"(\d+)x(\d+)(?:([+-]\d+)([+-]\d+))?", geom)
+    if not m:
+        return default
+    w, h = max(int(m.group(1)), min_w), max(int(m.group(2)), min_h)
+    return f"{w}x{h}{m.group(3) or ''}{m.group(4) or ''}"
 
 
 def save_config(config: dict) -> None:
@@ -2098,7 +2112,7 @@ class App(ctk.CTk):
         self.config = load_config()
         self.T = load_strings(self.config.get("lang", "en"))
         self.title(f"{self.T['window_title']} v{VERSION}")
-        self.geometry("960x640")
+        self.geometry(parse_geometry(self.config.get("window_geometry", "")))
         self.minsize(800, 500)
         self.configure(fg_color=WIN95_BG)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -2161,7 +2175,15 @@ class App(ctk.CTk):
             try: self._tray_icon.stop()
             except Exception: pass  # tray may already be gone during close
         if self._clean_timer: self._clean_timer.cancel()
+        self._persist_window_geometry()
         self._full_exit()
+
+    def _persist_window_geometry(self):
+        try:
+            self.config["window_geometry"] = parse_geometry(self.geometry())
+            save_config(self.config)
+        except Exception:
+            pass  # read-only FS or closing race: best-effort only
 
     def _full_exit(self):
         self.cancel_event.set()

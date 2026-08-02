@@ -93,6 +93,29 @@ class TestConfigPersistence(unittest.TestCase):
         tmp = self.tmp_config.with_suffix(".json.tmp")
         self.assertFalse(tmp.exists())
 
+    def test_window_geometry_default(self):
+        result = vac.load_config()
+        self.assertIn("window_geometry", result)
+        self.assertEqual(result["window_geometry"], "")
+
+    def test_window_geometry_roundtrip(self):
+        vac.save_config({"custom_rules": [], "window_geometry": "1024x768+10+20"})
+        loaded = vac.load_config()
+        self.assertEqual(loaded["window_geometry"], "1024x768+10+20")
+
+    def test_parse_geometry_valid(self):
+        self.assertEqual(vac.parse_geometry("1280x720-5+10"), "1280x720-5+10")
+
+    def test_parse_geometry_empty_or_garbage(self):
+        self.assertEqual(vac.parse_geometry(""), "960x640")
+        self.assertEqual(vac.parse_geometry("garbage"), "960x640")
+
+    def test_parse_geometry_without_offsets(self):
+        self.assertEqual(vac.parse_geometry("1280x720"), "1280x720")
+
+    def test_parse_geometry_clamps_minimum(self):
+        self.assertEqual(vac.parse_geometry("400x300+0+0"), "800x500+0+0")
+
 
 class TestSafetyGuard(unittest.TestCase):
 

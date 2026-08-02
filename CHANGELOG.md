@@ -1,5 +1,10 @@
 # Changelog
 
+## v2.4.2
+- Window geometry persistence restored: size/position saved to `cleaner_config.json` on close, restored on start (`parse_geometry` clamps to 800x500 minimum)
+- `save_config()` now used by the GUI close path (was test-only)
+- 6 new tests (77 total)
+
 ## v2.4.1
 - Docs refresh: wiki pages updated for v2.4.0 (lang config key, 71 tests, strings bundle) — `docs/` synced from saiwiki payload
 - Translations: `lang` config key documented in README.ru.md / README.et.md
