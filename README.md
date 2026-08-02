@@ -1,5 +1,7 @@
 # Smart VAC Cleaner
 
+[English](README.md) · [Русский](README.ru.md) · [Eesti](README.et.md)
+
 ![Smart VAC Cleaner GUI](assets/screenshot.png)
 
 Portable, safe, modern junk cleaner for Windows. GUI + CLI + Task Scheduler.
@@ -154,6 +156,10 @@ python -m pytest -q
 ```
 
 Runs offline, touches only temp directories.
+
+## Documentation
+
+Full docs live in [docs/](docs/Home.md): [Safety](docs/Safety.md), [CLI Reference](docs/CLI-Reference.md), [Configuration](docs/Configuration.md), [Build & Install](docs/Build-and-Install.md), [FAQ](docs/FAQ.md).
 
 ## Notes
 
