@@ -49,7 +49,7 @@ except ImportError:
 
 from datetime import datetime
 from pathlib import Path
-from tkinter import simpledialog
+from tkinter import messagebox, simpledialog
 
 import customtkinter as ctk
 
@@ -57,7 +57,7 @@ import customtkinter as ctk
 
 
 
-VERSION = "2.1.0"
+VERSION = "2.1.1"
 
 DEFAULT_THREADS = 12
 
@@ -1708,6 +1708,16 @@ def load_config() -> dict:
 
     if not CONFIG_FILE.exists():
 
+        try:
+
+            with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+
+                json.dump(default_cfg, f, indent=4)
+
+        except OSError:
+
+            pass  # read-only FS: config stays in-memory only
+
         return default_cfg
 
     try:
@@ -2022,6 +2032,11 @@ class App(ctk.CTk):
 
     def _start_job(self):
         if self._clean_in_progress: return
+        if not messagebox.askyesno(
+                "Confirm DELETE",
+                "Files will be permanently removed (no recycle bin).\n\nContinue?",
+                parent=self, icon="warning", default="no"):
+            return
         self._rebuild_cat_bars()
         self._clean_in_progress = True
         self.cancel_event.clear()

@@ -61,6 +61,10 @@ class TestConfigPersistence(unittest.TestCase):
         self.assertIn("custom_rules", result)
         self.assertIn("portable_roots", result)
 
+    def test_load_creates_config_file(self):
+        vac.load_config()
+        self.assertTrue(self.tmp_config.exists())
+
     def test_save_and_load_roundtrip(self):
         data = {"custom_rules": [{"path": "/tmp", "pattern": "*.log"}]}
         vac.save_config(data)

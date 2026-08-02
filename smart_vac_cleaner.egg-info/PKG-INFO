@@ -1,3 +1,25 @@
+Metadata-Version: 2.4
+Name: smart-vac-cleaner
+Version: 2.1.0
+Summary: Portable, safe, modern junk cleaner for Windows: system junk, app caches, portable roots, custom rules. GUI + CLI + Task Scheduler.
+Author: vacterro
+License: MIT
+Keywords: cleaner,junk,cache,portable,windows,maintenance
+Classifier: Environment :: Win32 (MS Windows)
+Classifier: License :: OSI Approved :: MIT License
+Classifier: Operating System :: Microsoft :: Windows
+Classifier: Programming Language :: Python :: 3
+Classifier: Programming Language :: Python :: 3.10
+Classifier: Programming Language :: Python :: 3.11
+Classifier: Topic :: System :: Systems Administration
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+License-File: LICENSE
+Requires-Dist: customtkinter>=5.2
+Requires-Dist: pystray>=0.19
+Requires-Dist: Pillow>=10.0
+Dynamic: license-file
+
 # Smart VAC Cleaner
 
 Portable, safe, modern junk cleaner for Windows. GUI + CLI + Task Scheduler.
@@ -38,13 +60,6 @@ Missing drives are silently skipped, never errors.
 python -m venv .venv
 .venv\Scripts\activate
 pip install -r requirements.txt
-```
-
-Or install as a package (adds the `vac-cleaner` command):
-
-```bat
-pip install .
-vac-cleaner --status
 ```
 
 GUI:
