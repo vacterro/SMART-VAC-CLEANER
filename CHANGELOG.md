@@ -1,5 +1,8 @@
 # Changelog
 
+## v2.4.6
+- Fixed "Golden Default" theme tokens using exact `goldendefault.json` from the Wintage repo (`#1A1810` background, restored semantic button colors).
+
 ## v2.4.5
 - Fixed UI tokens to match the UI.md Vintage Golden default (lighter background `#342012`, uniform golden button text).
 
