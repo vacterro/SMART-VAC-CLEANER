@@ -1,5 +1,8 @@
 # Changelog
 
+## v2.4.7
+- Removed developer-only "Find New Junk" scanner button to reduce UI noise.
+
 ## v2.4.6
 - Fixed "Golden Default" theme tokens using exact `goldendefault.json` from the Wintage repo (`#1A1810` background, restored semantic button colors).
 

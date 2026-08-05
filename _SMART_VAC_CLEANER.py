@@ -57,7 +57,7 @@ import customtkinter as ctk
 
 
 
-VERSION = "2.4.6"
+VERSION = "2.4.7"
 
 DEFAULT_THREADS = 12
 
@@ -2073,35 +2073,6 @@ JUNK_KEYWORDS = {
     'blob_storage', 'storage', 'videodecodestats',
 }
 
-def find_new_junk(known_targets=None, max_depth=3):
-    if known_targets is None:
-        known_targets = set()
-        for t, d in USER_APPDATA_TARGETS:
-            known_targets.add(str(t.resolve()).lower())
-            known_targets.add(d.lower())
-    found = []
-    for root in [Path(os.environ.get('LOCALAPPDATA', '')), Path(os.environ.get('APPDATA', ''))]:
-        if not root.exists(): continue
-        queue = [(root, 0)]
-        while queue:
-            current, depth = queue.pop(0)
-            if depth > max_depth: continue
-            try:
-                for item in current.iterdir():
-                    if not item.is_dir() or item.is_symlink(): continue
-                    nm = item.name.lower()
-                    rslv = str(item.resolve()).lower()
-                    if rslv in known_targets: continue
-                    for kw in JUNK_KEYWORDS:
-                        if kw in nm or kw.replace(' ', '') in nm:
-                            found.append((item, nm, get_size(item)))
-                            break
-                    else:
-                        queue.append((item, depth + 1))
-            except (PermissionError, OSError): pass
-    found.sort(key=lambda x: x[2], reverse=True)
-    return found
-
 
 # ── Vintage Dark-Golden token map (UI.md spec) ──────────────────────
 WIN95_BG           = '#1A1810'
@@ -2175,9 +2146,7 @@ class App(ctk.CTk):
         row += 1
         self.btn_stop = ctk.CTkButton(side, text=self.T["stop"], font=native_font, fg_color=WIN95_BUTTON, hover_color=WIN95_BUTTON_HOVER, text_color=WIN95_TEXT, text_color_disabled=WIN95_TEXT_MUTED, corner_radius=Z, height=30, border_width=2, border_color=BEVEL_RAISED, command=self._cancel_job, state="disabled")
         self.btn_stop.grid(row=row, column=0, pady=4, padx=10, sticky="ew")
-        row += 1
-        self.btn_junk = ctk.CTkButton(side, text=self.T["find_new_junk"], font=native_font, fg_color=WIN95_BUTTON, hover_color=WIN95_BUTTON_HOVER, text_color=WIN95_TEXT, corner_radius=Z, border_width=2, border_color=BEVEL_RAISED, command=self._open_junk_scanner)
-        self.btn_junk.grid(row=row, column=0, pady=4, padx=10, sticky="ew")
+
         row += 1
         self.btn_task = ctk.CTkButton(side, text=self.T["install_task"], font=native_font, fg_color=WIN95_BUTTON, hover_color=WIN95_BUTTON_HOVER, text_color=WIN95_ACCENT, corner_radius=Z, border_width=2, border_color=BEVEL_RAISED, command=self._install_scheduled_task)
         self.btn_task.grid(row=row, column=0, pady=4, padx=10, sticky="ew")
@@ -2368,39 +2337,6 @@ class App(ctk.CTk):
         if not (0 <= int(hh) < 24 and 0 <= int(mm) < 60):
             return
         install_task(f"{int(hh):02d}:{int(mm):02d}")
-
-    def _open_junk_scanner(self):
-        win = ctk.CTkToplevel(self)
-        win.title(self.T["junk_window_title"])
-        win.geometry("600x400")
-        win.configure(fg_color=WIN95_BG)
-        lbl = ctk.CTkLabel(win, text=self.T["scanning"], font=native_font, text_color=WIN95_TEXT)
-        lbl.pack(pady=10)
-        results = []
-        def scan():
-            r = find_new_junk()
-            results.extend(r)
-            def _on_done():
-                try:
-                    if win.winfo_exists():
-                        lbl.configure(text=f"Found {len(results)} directories")
-                        self._show_scanner_results(win, results)
-                except Exception:
-                    pass
-            win.after(0, _on_done)
-        import threading as _t
-        _t.Thread(target=scan, daemon=True).start()
-
-    def _show_scanner_results(self, win, results):
-        f = ctk.CTkScrollableFrame(win, fg_color=WIN95_BG_SOFT)
-        f.pack(fill="both", expand=True, padx=10, pady=5)
-        if not results:
-            ctk.CTkLabel(f, text=self.T["nothing_found"], font=native_font, text_color=WIN95_TEXT).pack(pady=20)
-            return
-        for item, _, sz in results:
-            r = ctk.CTkFrame(f, fg_color="transparent")
-            r.pack(fill="x", pady=2)
-            ctk.CTkLabel(r, text=f"{fmt(sz):>8}  {item}", font=("Verdana", 10), text_color=WIN95_TEXT, anchor="w").pack(side="left", fill="x", expand=True)
 
 
 def _get_pythonw() -> str:
