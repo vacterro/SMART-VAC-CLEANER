@@ -1,5 +1,8 @@
 # Changelog
 
+## v2.4.5
+- Fixed UI tokens to match the UI.md Vintage Golden default (lighter background `#342012`, uniform golden button text).
+
 ## v2.4.4
 - Applied precise vintage Dark-Golden theme tokens to UI (UI.md / vintage SKILL compliance).
 

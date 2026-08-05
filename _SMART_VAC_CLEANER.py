@@ -57,7 +57,7 @@ import customtkinter as ctk
 
 
 
-VERSION = "2.4.4"
+VERSION = "2.4.5"
 
 DEFAULT_THREADS = 12
 
@@ -2104,23 +2104,23 @@ def find_new_junk(known_targets=None, max_depth=3):
 
 
 # ── Vintage Dark-Golden token map (UI.md spec) ──────────────────────
-WIN95_BG           = '#1A0F05'   # background: deep brown-black canvas
-WIN95_BG_SOFT      = '#1E1408'   # backgroundSoft
-WIN95_SURFACE_RAISED = '#362812'   # surfaceRaised
-WIN95_SURFACE_ALT  = '#3A2A15'   # surfaceAlt
-WIN95_BEVEL_HI     = '#C0A060'   # borderHighlight: top-left bevel (golden)
-WIN95_BEVEL_SH     = '#0E0803'   # borderDark: bottom-right bevel shadow
-WIN95_TEXT         = '#D4B87A'   # textPrimary
-WIN95_TEXT_DIM     = '#B09558'   # textSecondary
-WIN95_TEXT_MUTED   = '#7A6838'   # textMuted / disabled
-WIN95_GOLD         = '#D4B87A'   # accentCursor / gold accent
-WIN95_GOLD_DIM     = '#B09558'   # textSecondary reuse
-WIN95_ACCENT         = '#008080'   # teal accent
-WIN95_DANGER       = '#7A2020'   # danger
-WIN95_SUCCESS        = '#4A7A20'   # success
-WIN95_BUTTON       = '#362812'   # surfaceRaised -> button default bg
-WIN95_BUTTON_HOVER = '#3A2A15'   # surfaceAlt -> button hover bg
-WIN95_ENTRY        = '#2A1C0A'   # surface -> sunken entry field default bg
+WIN95_BG           = '#342012'   # --background
+WIN95_BG_SOFT      = '#3A2616'   # --backgroundSoft
+WIN95_SURFACE_RAISED = '#5A4324'   # --surfaceRaised
+WIN95_SURFACE_ALT  = '#634B2B'   # --surfaceAlt
+WIN95_BEVEL_HI     = '#D3B57A'   # --borderHighlight
+WIN95_BEVEL_SH     = '#1C1208'   # --borderDark
+WIN95_TEXT         = '#E2CA95'   # --textPrimary
+WIN95_TEXT_DIM     = '#C5AB6E'   # --textSecondary
+WIN95_TEXT_MUTED   = '#95804C'   # --textMuted
+WIN95_GOLD         = '#E2CA95'   # accentCursor / gold accent
+WIN95_GOLD_DIM     = '#C5AB6E'   # textSecondary reuse
+WIN95_ACCENT       = '#008080'   # teal accent
+WIN95_DANGER       = '#963030'   # danger
+WIN95_SUCCESS      = '#5B9630'   # success
+WIN95_BUTTON       = '#5A4324'   # surfaceRaised -> button default bg
+WIN95_BUTTON_HOVER = '#634B2B'   # surfaceAlt -> button hover bg
+WIN95_ENTRY        = '#4A341B'   # surface -> sunken entry field default bg
 Z = 0  # corner_radius: 0 everywhere (sharp 90° rectangles)
 
 ctk.set_appearance_mode('dark')
@@ -2170,7 +2170,7 @@ class App(ctk.CTk):
         row = 0
         ctk.CTkLabel(side, text=f"VAC CLEANER v{VERSION}", font=("Verdana", 14, "bold"), text_color=WIN95_TEXT).grid(row=row, column=0, pady=(14, 4), padx=8)
         row += 1
-        self.btn_clean = ctk.CTkButton(side, text=self.T["clean"], font=("Verdana", 12, "bold"), fg_color=WIN95_BUTTON, hover_color=WIN95_BUTTON_HOVER, text_color=WIN95_DANGER, corner_radius=Z, height=34, border_width=2, border_color=BEVEL_RAISED, command=lambda: self._start_job())
+        self.btn_clean = ctk.CTkButton(side, text=self.T["clean"], font=("Verdana", 12, "bold"), fg_color=WIN95_BUTTON, hover_color=WIN95_BUTTON_HOVER, text_color=WIN95_TEXT, corner_radius=Z, height=34, border_width=2, border_color=BEVEL_RAISED, command=lambda: self._start_job())
         self.btn_clean.grid(row=row, column=0, pady=(16, 6), padx=10, sticky="ew")
         row += 1
         self.btn_stop = ctk.CTkButton(side, text=self.T["stop"], font=native_font, fg_color=WIN95_BUTTON, hover_color=WIN95_BUTTON_HOVER, text_color=WIN95_TEXT, text_color_disabled=WIN95_TEXT_MUTED, corner_radius=Z, height=30, border_width=2, border_color=BEVEL_RAISED, command=self._cancel_job, state="disabled")
@@ -2179,7 +2179,7 @@ class App(ctk.CTk):
         self.btn_junk = ctk.CTkButton(side, text=self.T["find_new_junk"], font=native_font, fg_color=WIN95_BUTTON, hover_color=WIN95_BUTTON_HOVER, text_color=WIN95_TEXT, corner_radius=Z, border_width=2, border_color=BEVEL_RAISED, command=self._open_junk_scanner)
         self.btn_junk.grid(row=row, column=0, pady=4, padx=10, sticky="ew")
         row += 1
-        self.btn_task = ctk.CTkButton(side, text=self.T["install_task"], font=native_font, fg_color=WIN95_BUTTON, hover_color=WIN95_BUTTON_HOVER, text_color=WIN95_ACCENT, corner_radius=Z, border_width=2, border_color=BEVEL_RAISED, command=self._install_scheduled_task)
+        self.btn_task = ctk.CTkButton(side, text=self.T["install_task"], font=native_font, fg_color=WIN95_BUTTON, hover_color=WIN95_BUTTON_HOVER, text_color=WIN95_TEXT, corner_radius=Z, border_width=2, border_color=BEVEL_RAISED, command=self._install_scheduled_task)
         self.btn_task.grid(row=row, column=0, pady=4, padx=10, sticky="ew")
         self.main_frame = ctk.CTkFrame(self, fg_color=WIN95_BG, corner_radius=Z)
         self.main_frame.grid(row=0, column=1, sticky="nsew", padx=(4,4), pady=4)
