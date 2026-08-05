@@ -1,5 +1,8 @@
 # Changelog
 
+## v2.4.4
+- Applied precise vintage Dark-Golden theme tokens to UI (UI.md / vintage SKILL compliance).
+
 ## v2.4.3
 - 11 new safe junk targets: Brave Cache/Code Cache/GPU Cache, Chrome + Edge Code Cache, CEF, Calibre, fontconfig, qBittorrent Logs, Claude CLI Cache, DaVinci Resolve Welcome Cache
 - Deep junk sweep: GitHub CLI `run-log-*.zip` cleanup (device-id/config untouched)

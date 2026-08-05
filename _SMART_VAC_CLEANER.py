@@ -57,7 +57,7 @@ import customtkinter as ctk
 
 
 
-VERSION = "2.4.3"
+VERSION = "2.4.4"
 
 DEFAULT_THREADS = 12
 
@@ -2103,25 +2103,25 @@ def find_new_junk(known_targets=None, max_depth=3):
     return found
 
 
-# в”Ђв”Ђ Vintage Dark-Golden token map (UI.md spec) в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
-WIN95_BG           = '#1A1810'   # background: deep brown-black canvas
-WIN95_BG_SOFT      = '#232018'   # backgroundSoft
-WIN95_SURFACE_RAISED = '#3D372A'   # surfaceRaised
-WIN95_SURFACE_ALT  = '#453D30'   # surfaceAlt
-WIN95_BEVEL_HI     = '#75663D'   # borderHighlight: top-left bevel (golden)
-WIN95_BEVEL_SH     = '#100E08'   # borderDark: bottom-right bevel shadow
-WIN95_TEXT         = '#D4C89A'   # textPrimary
-WIN95_TEXT_DIM     = '#9C9371'   # textSecondary
-WIN95_TEXT_MUTED   = '#6E674E'   # textMuted / disabled
-WIN95_GOLD         = '#D4C89A'   # accentCursor / gold accent
-WIN95_GOLD_DIM     = '#9C9371'   # textSecondary reuse
+# ── Vintage Dark-Golden token map (UI.md spec) ──────────────────────
+WIN95_BG           = '#1A0F05'   # background: deep brown-black canvas
+WIN95_BG_SOFT      = '#1E1408'   # backgroundSoft
+WIN95_SURFACE_RAISED = '#362812'   # surfaceRaised
+WIN95_SURFACE_ALT  = '#3A2A15'   # surfaceAlt
+WIN95_BEVEL_HI     = '#C0A060'   # borderHighlight: top-left bevel (golden)
+WIN95_BEVEL_SH     = '#0E0803'   # borderDark: bottom-right bevel shadow
+WIN95_TEXT         = '#D4B87A'   # textPrimary
+WIN95_TEXT_DIM     = '#B09558'   # textSecondary
+WIN95_TEXT_MUTED   = '#7A6838'   # textMuted / disabled
+WIN95_GOLD         = '#D4B87A'   # accentCursor / gold accent
+WIN95_GOLD_DIM     = '#B09558'   # textSecondary reuse
 WIN95_ACCENT         = '#008080'   # teal accent
 WIN95_DANGER       = '#7A2020'   # danger
-WIN95_SUCCESS        = '#5B9630'   # success
-WIN95_BUTTON       = '#3D372A'   # surfaceRaised вЂ” button default bg
-WIN95_BUTTON_HOVER = '#453D30'   # surfaceAlt вЂ” button hover bg
-WIN95_ENTRY        = '#1A1810'   # background вЂ” sunken entry field
-Z = 0  # corner_radius: 0 everywhere (sharp 90В° rectangles)
+WIN95_SUCCESS        = '#4A7A20'   # success
+WIN95_BUTTON       = '#362812'   # surfaceRaised -> button default bg
+WIN95_BUTTON_HOVER = '#3A2A15'   # surfaceAlt -> button hover bg
+WIN95_ENTRY        = '#2A1C0A'   # surface -> sunken entry field default bg
+Z = 0  # corner_radius: 0 everywhere (sharp 90° rectangles)
 
 ctk.set_appearance_mode('dark')
 ctk.set_default_color_theme('dark-blue')  # neutral base, overridden per widget
