@@ -57,7 +57,7 @@ import customtkinter as ctk
 
 
 
-VERSION = "2.4.7"
+VERSION = "2.4.8"
 
 DEFAULT_THREADS = 12
 
@@ -328,6 +328,22 @@ USER_APPDATA_TARGETS.extend([
     (get_env_path("LOCALAPPDATA", r"C:\Temp") / "qBittorrent" / "logs", "qBittorrent Logs"),
     (get_env_path("LOCALAPPDATA", r"C:\Temp") / "claude-cli-nodejs" / "Cache", "Claude CLI Cache"),
     (get_env_path("LOCALAPPDATA", r"C:\Temp") / "DaVinci Resolve Welcome", "Resolve Welcome Cache"),
+    # New findings (v2.4.8)
+    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "Mega Limited" / "MEGAsync" / "logs", "MEGAsync Logs (Local)"),
+    (get_env_path("APPDATA", r"C:\ProgramData") / "Devin" / "Cache", "Devin Cache"),
+    (get_env_path("APPDATA", r"C:\ProgramData") / "Devin" / "CachedData", "Devin CachedData"),
+    (get_env_path("APPDATA", r"C:\ProgramData") / "FontBase" / "Cache", "FontBase Cache"),
+    (get_env_path("APPDATA", r"C:\ProgramData") / "Bridge" / "Cache", "Adobe Bridge Cache"),
+    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "AIChatter" / "AI Chatter" / "cache", "AIChatter Cache"),
+    (get_env_path("APPDATA", r"C:\ProgramData") / "Autokroma" / "Influx" / "Cache", "Autokroma Influx Cache"),
+    (get_env_path("APPDATA", r"C:\ProgramData") / "Adobe" / "Adobe Substance 3D Sampler" / "thumbnailCache", "Substance 3D Thumbnail Cache"),
+    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "BlueStacks X" / "cache", "BlueStacks X Cache"),
+    (get_env_path("APPDATA", r"C:\ProgramData") / "@neuralnomads" / "codenomad-electron-app" / "session-data-v2" / "Cache", "CodeNomad Cache"),
+    (get_env_path("APPDATA", r"C:\ProgramData") / "MAXON" / "_assetcache", "Maxon Asset Cache"),
+    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "Mailbird" / "Misc" / "component_crx_cache", "Mailbird CRX Cache"),
+    (get_env_path("APPDATA", r"C:\ProgramData") / "Opera Software" / "Opera Stable" / "component_crx_cache", "Opera CRX Cache"),
+    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "BraveSoftware" / "Brave-Browser" / "User Data" / "component_crx_cache", "Brave CRX Cache"),
+    (get_env_path("APPDATA", r"C:\ProgramData") / "discord" / "component_crx_cache", "Discord CRX Cache"),
 ])
 
 

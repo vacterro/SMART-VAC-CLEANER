@@ -1,5 +1,8 @@
 # Changelog
 
+## v2.4.8
+- Added 15 new safe system cache paths to `USER_APPDATA_TARGETS` (including Devin, FontBase, Maxon, Opera, Brave, Discord CRX caches, BlueStacks, AIChatter).
+
 ## v2.4.7
 - Removed developer-only "Find New Junk" scanner button to reduce UI noise.
 
