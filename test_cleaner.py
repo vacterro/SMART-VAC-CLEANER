@@ -556,6 +556,19 @@ class TestCLIFunctions(unittest.TestCase):
             mock_status.assert_called_once()
 
     @patch("_SMART_VAC_CLEANER.argparse.ArgumentParser.parse_args")
+    def test_main_analyze_caches_flag(self, mock_parse):
+        """--analyze-caches calls analyze_caches.main()."""
+        mock_parse.return_value = MagicMock(
+            dry_run=False, delete=False,
+            portable=False, system=False, custom=False, all=False,
+            cli=False, status=False, analyze_caches=True, hidden=False, sys_targets="",
+            exclude="", install_task=False, time="09:00",
+        )
+        with patch("analyze_caches.main") as mock_analyze:
+            vac.main()
+            mock_analyze.assert_called_once()
+
+    @patch("_SMART_VAC_CLEANER.argparse.ArgumentParser.parse_args")
     def test_main_portable_flag(self, mock_parse):
         """--portable without --delete runs dry-run."""
         mock_parse.return_value = MagicMock(

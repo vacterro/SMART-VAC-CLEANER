@@ -13,7 +13,7 @@ Puuduvad kettad jäetakse vaikselt vahele, vigu ei teki kunagi.
 
 | Kiht | Mida | Kus |
 |---|---|---|
-| Süsteem | Temp, krahhi-dumbid, Exploreri pisipildid, Windows Update'i vahemälu, DNS-vahemälu, prügikast, 60+ rakenduste vahemälusid (brauserid, Node/uv/pip vahemälud, VS Code pere, Eagle, OBS, Discord...) | `%TEMP%`, `%LOCALAPPDATA%`, `%APPDATA%` |
+| Süsteem | Temp, krahhi-dumbid, Exploreri pisipildid, Windows Update'i vahemälu, DNS-vahemälu, prügikast, 100+ rakenduste vahemälusid (brauserid, Node/uv/pip vahemälud, VS Code pere, Eagle, OBS, Discord...) | `%TEMP%`, `%LOCALAPPDATA%`, `%APPDATA%` |
 | Deep C: Junk | Uuendajate jäänused, `*.exe.tmp`, Viber QmlWebCache, Yandex.Disk varukoopiad, ODIS logid, `app.asar.bak` jms | `%LOCALAPPDATA%`, `%TEMP%` |
 | Kaasaskantavad juured | Tuntud prügimustrid seadistatud juurte sees | `portable_roots` konfigis |
 | Kasutaja reeglid | Oma teed + glob-mustrid | `custom_rules` konfigis |
@@ -86,7 +86,8 @@ juures.
 | `--all` | Kõik kihid korraga |
 | `--delete` | **Päris kustutamine** (ilma selleta ainult eelvaade) |
 | `--dry-run` | Sunnitud eelvaade ka `--delete` juures |
-| `--status` | Näita prügi hulka sihtmärkide kaupa; midagi ei kustutata |
+| `--status` | Näita prügi mahtu eesmärkide kaupa; midagi ei kustutata |
+| `--analyze-caches` | Otsi AppData vahemälu kaustu > 5 MB |
 | `--sys-targets` | Süsteemsihtmärkide loend komadega (`System Temp`, `User Temp`, ...) |
 | `--exclude` | Lisamustrid eranditeks (`--exclude "*.db,*.tmp"`) |
 | `--hidden` | Peida konsooliaken (Tegumihaldurile) |

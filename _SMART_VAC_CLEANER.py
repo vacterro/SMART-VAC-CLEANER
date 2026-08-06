@@ -57,7 +57,7 @@ import customtkinter as ctk
 
 
 
-VERSION = "2.4.9"
+VERSION = "2.4.10"
 
 DEFAULT_THREADS = 12
 
@@ -2452,6 +2452,8 @@ def main():
     parser.add_argument("--all",      action="store_true")
     parser.add_argument("--cli",      action="store_true", default=False)
     parser.add_argument("--status",   action="store_true")
+    parser.add_argument("--analyze-caches", action="store_true",
+                        help="Scan AppData for cache folders > 5 MB")
     parser.add_argument("--hidden",   action="store_true", default=False,
                         help="Hide console window (used when launched by Task Scheduler)")
     parser.add_argument("--sys-targets", type=str, default="")
@@ -2462,12 +2464,12 @@ def main():
                         help="Start time for scheduled task (HH:MM, default 09:00)")
     args = parser.parse_args()
 
-    # в”Ђв”Ђ install-task в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+    # ── install-task ──────────────────────────────────────────────────────────
     if args.install_task:
         install_task(args.time)
         return
 
-    # в”Ђв”Ђ status в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+    # ── status ────────────────────────────────────────────────────────────────
     if args.status:
         cli_status()
         return

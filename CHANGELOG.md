@@ -1,6 +1,10 @@
 # Changelog
 
-## v2.4.9
+## v2.4.10
+- Fixed doc drift: updated "60+ AppData targets" to "100+ AppData targets" across `README.md`, `README.ru.md`, `README.et.md`, `docs/Home.md`.
+- Added native CLI `--analyze-caches` flag to discover AppData cache folders > 5 MB directly via console.
+- Documented `--analyze-caches` and exclude options across CLI docs and README tables.
+
 - Added 38 new safe system junk and cache paths to `USER_APPDATA_TARGETS` (Devin, Claude, Antigravity, CodeNomad, Ollama, LM Studio, Substance 3D, AccuRIG, Topaz, Unreal, Omniroute, etc.).
 
 ## v2.4.8
