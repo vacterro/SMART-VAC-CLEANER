@@ -18,7 +18,6 @@ Add `--delete` to actually remove files. `--dry-run` forces preview even when
 | `--hidden` | Hide console window (used by Task Scheduler) |
 | `--install-task` | Register the daily silent full-clean task |
 | `--time HH:MM` | Start time for the scheduled task (default `09:00`) |
-| `--time HH:MM` | Start time for the scheduled task (default `09:00`) |
 
 Examples:
 

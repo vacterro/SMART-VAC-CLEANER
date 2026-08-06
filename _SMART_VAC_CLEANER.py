@@ -592,15 +592,6 @@ class Logger:
         self._emit_gui(msg)
 
 
-    def warn(self, msg: str) -> None:
-
-        text = f"  [WARN]  {msg}"
-
-        self._log.warning(text)
-
-        self._emit_gui(text)
-
-
     def warning(self, msg: str) -> None:
 
         self._log.warning(msg)
@@ -2027,10 +2018,6 @@ class ProgressTracker:
                 c = self.categories[self.current_category]
                 c['current'] += 1
                 c['bytes'] += bytes_freed
-    def set_total(self, total):
-        with self.lock:
-            if self.current_category and self.current_category in self.categories:
-                self.categories[self.current_category]['total'] = total
     def finish_category(self, status='done'):
         with self.lock:
             if self.current_category and self.current_category in self.categories:

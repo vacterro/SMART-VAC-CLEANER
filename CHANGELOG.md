@@ -1,5 +1,10 @@
 # Changelog
 
+## v2.4.13
+- Removed dead `ProgressLogger.warn()` and `ProgressTracker.set_total()` (zero call sites).
+- Fixed duplicate `--time HH:MM` row in docs/CLI-Reference.md + wiki payload source.
+- 81 tests green, ruff clean.
+
 ## v2.4.12
 - GUI Exclusions editor: new **Exclusions** button opens a dialog editing `exclude_patterns` / `exclude_paths` (patterns textbox, paths list with browse + remove, Save persists to config); excludes are now actually passed into the cleaning job from the GUI.
 - Live progress dashboard: `ProgressTracker` wired into the cleaners — items freed and bytes now count per category instead of staying at 0.
