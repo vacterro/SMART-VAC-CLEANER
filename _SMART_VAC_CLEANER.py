@@ -49,7 +49,7 @@ except ImportError:
 
 from datetime import datetime
 from pathlib import Path
-from tkinter import messagebox, simpledialog
+from tkinter import Listbox, filedialog, messagebox, simpledialog
 
 import customtkinter as ctk
 
@@ -57,7 +57,7 @@ import customtkinter as ctk
 
 
 
-VERSION = "2.4.11"
+VERSION = "2.4.12"
 
 DEFAULT_THREADS = 12
 
@@ -103,6 +103,15 @@ DEFAULT_STRINGS: dict[str, str] = {
     "cancelling": "Cancelling...",
     "task_dialog_title": "Auto-Clean Task",
     "task_dialog_prompt": "Daily start time (HH:MM):",
+    "exclusions": "Exclusions",
+    "exc_title": "Exclusions",
+    "exc_patterns": "Patterns",
+    "exc_paths": "Paths",
+    "exc_add_path": "Add Path",
+    "exc_remove": "Remove",
+    "exc_saved": "Exclusions saved.",
+    "exc_help": "One pattern or path per line.\nPatterns use * wildcards (e.g. *.tmp).",
+    "save": "Save",
 }
 
 
@@ -192,38 +201,6 @@ def get_env_path(var_name: str, fallback: str) -> Path:
     val = os.environ.get(var_name, fallback)
 
     return Path(val).resolve()
-
-
-def format_env_path(path_obj: Path) -> str:
-
-    p = str(path_obj.resolve())
-
-    localappdata = os.environ.get("LOCALAPPDATA", "")
-
-    appdata = os.environ.get("APPDATA", "")
-
-    userprofile = os.environ.get("USERPROFILE", "")
-
-    windir = os.environ.get("windir", "")
-
-
-    if localappdata and p.startswith(localappdata):
-
-        return p.replace(localappdata, "%LOCALAPPDATA%", 1)
-
-    if appdata and p.startswith(appdata):
-
-        return p.replace(appdata, "%APPDATA%", 1)
-
-    if userprofile and p.startswith(userprofile):
-
-        return p.replace(userprofile, "%USERPROFILE%", 1)
-
-    if windir and p.startswith(windir):
-
-        return p.replace(windir, "%WINDIR%", 1)
-
-    return p
 
 
 SYSTEM_TEMP = Path(os.environ.get("windir", r"C:\Windows")) / "Temp"
@@ -877,6 +854,8 @@ class CleanerEngine:
 
         size = get_size(path)
 
+        if self.progress: self.progress.advance(size)
+
         try:
 
             self.deleted_rel_paths.add(path.relative_to(self.root))
@@ -908,6 +887,8 @@ class CleanerEngine:
         try: size = path.stat().st_size
 
         except OSError: size = 0
+
+        if self.progress: self.progress.advance(size)
 
         try:
 
@@ -2106,18 +2087,24 @@ def run_cleaning_job(dry_run, run_portable, run_system, run_custom, log, max_thr
         roots = [Path(r) for r in config.get('portable_roots', []) if Path(r).exists()]
         if not roots:
             log.info('No portable roots configured (see cleaner_config.json) - skipped.')
+        if progress: progress.start_category('Portable')
         for r in roots:
             if cancel_event and cancel_event.is_set(): raise CancelJobException('Cancelled')
             guard = SafetyGuard(r, exclude_patterns=exclude_patterns, exclude_paths=exclude_paths)
             PortableCleaner(dry_run, log, guard, r, max_threads, cancel_event, exclude_patterns=exclude_patterns, exclude_paths=exclude_paths, progress=progress).run_all()
+        if progress: progress.finish_category()
     if run_system:
         if cancel_event and cancel_event.is_set(): raise CancelJobException('Cancelled')
+        if progress: progress.start_category('System')
         SystemCleaner(dry_run, log, max_threads, sys_targets, cancel_event, exclude_patterns=exclude_patterns, exclude_paths=exclude_paths, progress=progress).run_all()
+        if progress: progress.finish_category()
     if run_custom:
         if cancel_event and cancel_event.is_set(): raise CancelJobException('Cancelled')
         config = load_config()
         if config.get('custom_rules'):
+            if progress: progress.start_category('Custom')
             CustomCleaner(dry_run, log, config['custom_rules'], max_threads, cancel_event, exclude_patterns=exclude_patterns, exclude_paths=exclude_paths, progress=progress).run_all()
+            if progress: progress.finish_category()
     log.summary()
 
 def cli_status():
@@ -2220,6 +2207,9 @@ class App(ctk.CTk):
         row += 1
         self.btn_task = ctk.CTkButton(side, text=self.T["install_task"], font=native_font, fg_color=WIN95_BUTTON, hover_color=WIN95_BUTTON_HOVER, text_color=WIN95_ACCENT, corner_radius=Z, border_width=2, border_color=BEVEL_RAISED, command=self._install_scheduled_task)
         self.btn_task.grid(row=row, column=0, pady=4, padx=10, sticky="ew")
+        row += 1
+        self.btn_exc = ctk.CTkButton(side, text=self.T["exclusions"], font=native_font, fg_color=WIN95_BUTTON, hover_color=WIN95_BUTTON_HOVER, text_color=WIN95_ACCENT, corner_radius=Z, border_width=2, border_color=BEVEL_RAISED, command=self._open_exclusions)
+        self.btn_exc.grid(row=row, column=0, pady=4, padx=10, sticky="ew")
         self.main_frame = ctk.CTkFrame(self, fg_color=WIN95_BG, corner_radius=Z)
         self.main_frame.grid(row=0, column=1, sticky="nsew", padx=(4,4), pady=4)
         self.main_frame.grid_columnconfigure(0, weight=1)
@@ -2287,7 +2277,7 @@ class App(ctk.CTk):
         try:
             log = Logger(BASE_DIR/"logs"/f"clean_{datetime.now().astimezone():%Y%m%d_%H%M%S}.log", False, gui_callback=self._log)
             all_targets = {k: True for k in SYSTEM_TARGET_DEFAULTS}
-            run_cleaning_job(False, True, True, True, log, DEFAULT_THREADS, all_targets, self.cancel_event, progress=self.progress)
+            run_cleaning_job(False, True, True, True, log, DEFAULT_THREADS, all_targets, self.cancel_event, progress=self.progress, exclude_patterns=self.config.get('exclude_patterns'), exclude_paths=self.config.get('exclude_paths'))
         except CancelJobException:
             self._log(self.T["cancelled"])
         except Exception as e:
@@ -2396,17 +2386,75 @@ class App(ctk.CTk):
             def on_ex(ic, it): ic.stop(); self.after(0, self._full_exit)
             self._tray_icon = pystray.Icon("vac_cleaner", img, "VAC", pystray.Menu(pystray.MenuItem(self.T["clean"], on_cl), pystray.MenuItem("Exit", on_ex)))
             self._tray_icon.run_detached()
-        except Exception:
-            pass
+        except Exception as e:
+            logging.getLogger("vac_cleaner").warning(f"Tray icon failed to start: {e}")
 
     def _install_scheduled_task(self):
         start = simpledialog.askstring(self.T["task_dialog_title"], self.T["task_dialog_prompt"], initialvalue="09:00", parent=self)
         if not start:
             return
-        hh, mm = start.split(":")
-        if not (0 <= int(hh) < 24 and 0 <= int(mm) < 60):
-            return
-        install_task(f"{int(hh):02d}:{int(mm):02d}")
+        try:
+            hh, mm = start.split(":")
+            if not (0 <= int(hh) < 24 and 0 <= int(mm) < 60):
+                return
+            install_task(f"{int(hh):02d}:{int(mm):02d}")
+        except Exception as e:
+            logging.getLogger("vac_cleaner").warning(f"Failed to install scheduled task: {e}")
+
+    def _open_exclusions(self):
+        win = ctk.CTkToplevel(self)
+        win.title(self.T["exc_title"])
+        win.geometry("640x540")
+        win.minsize(560, 440)
+        win.configure(fg_color=WIN95_BG)
+        win.transient(self)
+        win.grab_set()
+        win.grid_columnconfigure(0, weight=1)
+        win.grid_rowconfigure(4, weight=1)
+
+        ctk.CTkLabel(win, text=self.T["exc_help"], font=native_font, text_color=WIN95_TEXT_DIM, anchor='w').grid(row=0, column=0, sticky='ew', padx=10, pady=(10, 4))
+        ctk.CTkLabel(win, text=self.T["exc_patterns"], font=native_font, text_color=WIN95_TEXT, anchor='w').grid(row=1, column=0, sticky='ew', padx=10)
+        txt = ctk.CTkTextbox(win, fg_color=WIN95_BG, text_color=WIN95_TEXT, font=data_font, corner_radius=Z, border_width=2, border_color=BEVEL_SUNKEN)
+        txt.grid(row=2, column=0, sticky='nsew', padx=10, pady=(2, 8))
+        txt.insert('1.0', "\n".join(self.config.get('exclude_patterns', [])))
+
+        ctk.CTkLabel(win, text=self.T["exc_paths"], font=native_font, text_color=WIN95_TEXT, anchor='w').grid(row=3, column=0, sticky='ew', padx=10)
+        path_frame = ctk.CTkFrame(win, fg_color=WIN95_BG_SOFT, corner_radius=Z)
+        path_frame.grid(row=4, column=0, sticky='nsew', padx=10, pady=(2, 8))
+        path_frame.grid_columnconfigure(0, weight=1)
+        path_frame.grid_rowconfigure(0, weight=1)
+        lb = Listbox(path_frame, bg=WIN95_BG, fg=WIN95_TEXT, selectbackground=WIN95_SURFACE_RAISED, selectforeground=WIN95_TEXT, relief='sunken', bd=2, font=("Courier New", 10), highlightthickness=0, exportselection=False)
+        lb.grid(row=0, column=0, sticky='nsew', padx=6, pady=6)
+        for p in self.config.get('exclude_paths', []):
+            lb.insert('end', str(p))
+        btn_col = ctk.CTkFrame(path_frame, fg_color='transparent', corner_radius=Z)
+        btn_col.grid(row=0, column=1, sticky='n', padx=(0, 6), pady=6)
+        ctk.CTkButton(btn_col, text=self.T["exc_add_path"], width=110, font=native_font, fg_color=WIN95_BUTTON, hover_color=WIN95_BUTTON_HOVER, text_color=WIN95_TEXT, corner_radius=Z, border_width=2, border_color=BEVEL_RAISED, command=lambda: self._exc_add_path(lb)).pack(pady=2)
+        ctk.CTkButton(btn_col, text=self.T["exc_remove"], width=110, font=native_font, fg_color=WIN95_BUTTON, hover_color=WIN95_BUTTON_HOVER, text_color=WIN95_TEXT, corner_radius=Z, border_width=2, border_color=BEVEL_RAISED, command=lambda: self._exc_remove_path(lb)).pack(pady=2)
+
+        bar = ctk.CTkFrame(win, fg_color='transparent', corner_radius=Z)
+        bar.grid(row=5, column=0, sticky='ew', padx=10, pady=(0, 10))
+        bar.grid_columnconfigure(0, weight=1)
+        ctk.CTkButton(bar, text=self.T["save"], width=110, font=native_font, fg_color=WIN95_BUTTON, hover_color=WIN95_BUTTON_HOVER, text_color=WIN95_GOLD, corner_radius=Z, border_width=2, border_color=BEVEL_RAISED, command=lambda: self._save_exclusions(win, txt, lb)).grid(row=0, column=0, sticky='w')
+
+    def _exc_add_path(self, lb):
+        d = filedialog.askdirectory(parent=lb.winfo_toplevel(), title=self.T["exc_add_path"])
+        if d:
+            lb.insert('end', str(Path(d)))
+
+    def _exc_remove_path(self, lb):
+        sel = lb.curselection()
+        if sel:
+            lb.delete(sel[0])
+
+    def _save_exclusions(self, win, txt, lb):
+        pats = [ln.strip() for ln in txt.get('1.0', 'end').splitlines() if ln.strip()]
+        paths = [str(Path(p)) for p in lb.get(0, 'end') if str(p).strip()]
+        self.config['exclude_patterns'] = pats
+        self.config['exclude_paths'] = paths
+        save_config(self.config)
+        win.destroy()
+        self._log(self.T["exc_saved"])
 
 
 def _get_pythonw() -> str:

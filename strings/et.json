@@ -12,5 +12,14 @@
   "cancelled": "Katkestatud.",
   "cancelling": "Katkestamine...",
   "task_dialog_title": "Autopuhastuse ülesanne",
-  "task_dialog_prompt": "Igapäevase käivituse kellaaeg (HH:MM):"
+  "task_dialog_prompt": "Igapäevase käivituse kellaaeg (HH:MM):",
+  "exclusions": "Välistused",
+  "exc_title": "Välistused",
+  "exc_patterns": "Mustrid",
+  "exc_paths": "Teed",
+  "exc_add_path": "Lisa tee",
+  "exc_remove": "Eemalda",
+  "exc_saved": "Välistused salvestatud.",
+  "exc_help": "Üks muster või tee rea kohta.\nMustrites saab kasutada * (nt *.tmp).",
+  "save": "Salvesta"
 }

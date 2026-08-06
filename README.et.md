@@ -69,9 +69,9 @@ python _SMART_VAC_CLEANER.py
 ```
 
 Neli nuppu: **Puhasta** (päris kustutamine — küsib eelnevalt kinnitust),
-**Peata**, **Leia uus prügi** (otsib AppData'st uusi kandidaate),
-**Paigalda autopuhastuse ülesanne**. Progressiribad kategooriate kaupa,
-täielik logiakken; iga käivitus jõuab ka `logs\clean_*.log` faili.
+**Peata**, **Paigalda autopuhastuse ülesanne**, **Välistused** (ära-kustuta
+mustrite ja teede muutmine). Progressiribad kategooriate kaupa, täielik
+logiakken; iga käivitus jõuab ka `logs\clean_*.log` faili.
 
 ## CLI
 

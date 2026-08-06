@@ -1,5 +1,13 @@
 # Changelog
 
+## v2.4.12
+- GUI Exclusions editor: new **Exclusions** button opens a dialog editing `exclude_patterns` / `exclude_paths` (patterns textbox, paths list with browse + remove, Save persists to config); excludes are now actually passed into the cleaning job from the GUI.
+- Live progress dashboard: `ProgressTracker` wired into the cleaners — items freed and bytes now count per category instead of staying at 0.
+- Removed dead `format_env_path()`; tray-icon and scheduled-task install failures now log a warning instead of failing silently.
+- i18n: 9 new GUI string keys (en/ru/et); README.ru/et GUI sections synced to the current button set (Find New Junk removed, Exclusions added).
+- Wiki/docs sync: Configuration (GUI editor note), Home (Exclusions + live progress bullets), CLI Reference (+`--time HH:MM` flag row).
+- 81 tests green, ruff clean.
+
 ## v2.4.11
 - Added 14 new safe cache paths to `USER_APPDATA_TARGETS` discovered via `--analyze-caches` / deep scan: DriveFS Logs (Local), Razer Engine Cache/Code/GPU/Service Worker, Epic webcache (Local), VS Code WebStorage CacheStorage, VerifiedSkill CRX Cache, MaxonApp WebView Cache/Code/Shader, Photoshop 2024 Logs, Obsidian GPUCache (~2.2 GB on this machine).
 - Fixed dead `--analyze-caches` flag: `main()` now dispatches to `analyze_caches.main()` (flag was parsed but never executed).

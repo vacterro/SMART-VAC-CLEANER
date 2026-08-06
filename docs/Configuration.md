@@ -45,5 +45,5 @@ Every path is normalized the moment the config is read:
   the cleaner's own folder) are rejected for roots and custom rules
 
 User config values survive upgrades; a legacy `profiles` key is dropped
-automatically. The GUI has no config editor yet — edit the JSON by hand
-(see T-023 on the board).
+automatically. The GUI **Exclusions** button edits `exclude_patterns` and
+`exclude_paths`; other keys are edited in the JSON by hand.

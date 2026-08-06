@@ -71,8 +71,8 @@ python _SMART_VAC_CLEANER.py
 ```
 
 Four buttons: **Clean** (real delete — asks for confirmation first), **Stop**,
-**Find New Junk** (scans AppData for new junk candidates), **Install Auto-Clean
-Task**. Progress bars per category, full log window; every run also lands in
+**Install Auto-Clean Task**, **Exclusions** (edit never-delete patterns and
+paths). Progress bars per category, full log window; every run also lands in
 `logs\clean_*.log`.
 
 ## CLI
