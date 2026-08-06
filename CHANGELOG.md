@@ -1,5 +1,8 @@
 # Changelog
 
+## v2.4.9
+- Added 38 new safe system junk and cache paths to `USER_APPDATA_TARGETS` (Devin, Claude, Antigravity, CodeNomad, Ollama, LM Studio, Substance 3D, AccuRIG, Topaz, Unreal, Omniroute, etc.).
+
 ## v2.4.8
 - Added 15 new safe system cache paths to `USER_APPDATA_TARGETS` (including Devin, FontBase, Maxon, Opera, Brave, Discord CRX caches, BlueStacks, AIChatter).
 

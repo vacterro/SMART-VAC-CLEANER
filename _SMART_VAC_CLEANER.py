@@ -57,7 +57,7 @@ import customtkinter as ctk
 
 
 
-VERSION = "2.4.8"
+VERSION = "2.4.9"
 
 DEFAULT_THREADS = 12
 
@@ -344,6 +344,45 @@ USER_APPDATA_TARGETS.extend([
     (get_env_path("APPDATA", r"C:\ProgramData") / "Opera Software" / "Opera Stable" / "component_crx_cache", "Opera CRX Cache"),
     (get_env_path("LOCALAPPDATA", r"C:\Temp") / "BraveSoftware" / "Brave-Browser" / "User Data" / "component_crx_cache", "Brave CRX Cache"),
     (get_env_path("APPDATA", r"C:\ProgramData") / "discord" / "component_crx_cache", "Discord CRX Cache"),
+    # New findings (v2.4.9)
+    (get_env_path("APPDATA", r"C:\ProgramData") / "Devin" / "GPUCache", "Devin GPUCache"),
+    (get_env_path("APPDATA", r"C:\ProgramData") / "Devin" / "logs", "Devin Logs"),
+    (get_env_path("APPDATA", r"C:\ProgramData") / "Devin" / "cli" / "logs", "Devin CLI Logs"),
+    (get_env_path("APPDATA", r"C:\ProgramData") / "Claude" / "GPUCache", "Claude GPUCache"),
+    (get_env_path("APPDATA", r"C:\ProgramData") / "Antigravity" / "GPUCache", "Antigravity GPUCache"),
+    (get_env_path("APPDATA", r"C:\ProgramData") / "Antigravity" / "logs", "Antigravity Logs"),
+    (get_env_path("APPDATA", r"C:\ProgramData") / "@neuralnomads" / "codenomad-electron-app" / "session-data-v2" / "Code Cache", "CodeNomad Code Cache"),
+    (get_env_path("APPDATA", r"C:\ProgramData") / "@neuralnomads" / "codenomad-electron-app" / "session-data-v2" / "GPUCache", "CodeNomad GPUCache"),
+    (get_env_path("APPDATA", r"C:\ProgramData") / "ollama app.exe" / "EBWebView" / "Default" / "GPUCache", "Ollama GPUCache"),
+    (get_env_path("APPDATA", r"C:\ProgramData") / "LM Studio" / "GPUCache", "LM Studio GPUCache"),
+    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "Adobe" / "Adobe Substance 3D Painter" / "cache", "Substance 3D Painter Cache"),
+    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "Adobe" / "Adobe Substance 3D Sampler" / "cache", "Substance 3D Sampler Cache"),
+    (get_env_path("APPDATA", r"C:\ProgramData") / "CELSYS" / "CLIPStudioPaint" / "1.5.0" / "CacheData", "CLIP Studio Paint Cache"),
+    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "Reallusion" / "ActorCore AccuRIG" / "Cache", "AccuRIG Cache"),
+    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "Reallusion" / "ActorCore AccuRIG" / "Code Cache", "AccuRIG Code Cache"),
+    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "Reallusion" / "Character Creator" / "5.0" / "cache", "Character Creator Cache"),
+    (get_env_path("APPDATA", r"C:\ProgramData") / "LosslessCut" / "Cache", "LosslessCut Cache"),
+    (get_env_path("APPDATA", r"C:\ProgramData") / "LosslessCut" / "GPUCache", "LosslessCut GPUCache"),
+    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "Topaz Labs LLC" / "Topaz Video" / "cache", "Topaz Video Cache"),
+    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "Topaz Labs LLC" / "Topaz Video AI" / "cache", "Topaz Video AI Cache"),
+    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "UnrealEngine" / "5.6" / "DerivedDataCache", "Unreal Engine 5.6 DDCache"),
+    (get_env_path("APPDATA", r"C:\ProgramData") / "omniroute-desktop" / "Cache", "Omniroute Cache"),
+    (get_env_path("APPDATA", r"C:\ProgramData") / "omniroute-desktop" / "Code Cache", "Omniroute Code Cache"),
+    (get_env_path("APPDATA", r"C:\ProgramData") / "omniroute-desktop" / "GPUCache", "Omniroute GPUCache"),
+    (get_env_path("APPDATA", r"C:\ProgramData") / "omniroute-desktop" / "Service Worker" / "CacheStorage", "Omniroute SW CacheStorage"),
+    (get_env_path("APPDATA", r"C:\ProgramData") / "stem-studio" / "Cache", "Stem Studio Cache"),
+    (get_env_path("APPDATA", r"C:\ProgramData") / "stem-studio" / "GPUCache", "Stem Studio GPUCache"),
+    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "QuiteRss" / "QuiteRss" / "cache", "QuiteRss Cache"),
+    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "com.dropdead.app" / "EBWebView" / "Default" / "Cache", "Dropdead WebView Cache"),
+    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "DeskChat" / "DeskChat" / "cache", "DeskChat Cache"),
+    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "DeskChat Dump" / "cache", "DeskChat Dump Cache"),
+    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "HD-Player" / "cache", "HD-Player Cache"),
+    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "JangaFX" / "liquigen" / "gl-cache", "Liquigen GL Cache"),
+    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "Krisp" / "Logs", "Krisp Logs"),
+    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "Mailbird" / "Misc" / "Default" / "Cache", "Mailbird Cache"),
+    (get_env_path("APPDATA", r"C:\ProgramData") / "SiYuan-Electron" / "GPUCache", "SiYuan GPUCache"),
+    (get_env_path("APPDATA", r"C:\ProgramData") / "BetterDiscord Installer" / "Cache", "BetterDiscord Cache"),
+    (get_env_path("APPDATA", r"C:\ProgramData") / "BorisFX" / "BorisFX Direct" / "Cache", "BorisFX Direct Cache"),
 ])
 
 
@@ -2095,7 +2134,7 @@ WIN95_BG           = '#1A1810'
 WIN95_BG_SOFT      = '#232018'
 WIN95_SURFACE_RAISED = '#3D372A'
 WIN95_SURFACE_ALT  = '#453D30'
-WIN95_BEVEL_HI     = '#F0D060'
+WIN95_BEVEL_HI     = '#75663D'
 WIN95_BEVEL_SH     = '#100E08'
 WIN95_TEXT         = '#D4C89A'
 WIN95_TEXT_DIM     = '#9C9371'
@@ -2103,11 +2142,11 @@ WIN95_TEXT_MUTED   = '#6E674E'
 WIN95_GOLD         = '#D4C89A'
 WIN95_GOLD_DIM     = '#9C9371'
 WIN95_ACCENT       = '#008080'
-WIN95_DANGER       = '#D66464'  # using dangerText for better contrast
+WIN95_DANGER       = '#7A2020'  # using dangerText for better contrast
 WIN95_SUCCESS      = '#4A7A20'
 WIN95_BUTTON       = '#3D372A'
 WIN95_BUTTON_HOVER = '#453D30'
-WIN95_ENTRY        = '#332E22'
+WIN95_ENTRY        = '#1A1810'
 Z = 0  # corner_radius: 0 everywhere (sharp 90° rectangles)
 
 ctk.set_appearance_mode('dark')
