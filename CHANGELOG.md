@@ -1,5 +1,20 @@
 # Changelog
 
+## v2.4.15
+- New **Run in bg** button (sidebar, under Install Auto-Clean Task): spawns a detached silent background full-clean (`pythonw`/exe, hidden console, no GUI) and returns — double-click guarded via `Popen.poll()`. Reuses the same argv as the scheduled task.
+- i18n: 3 new string keys (en/ru/et): `run_bg`, `run_bg_started`, `run_bg_running`.
+- Dead i18n sweep: removed 4 unused keys (`find_new_junk`, `junk_window_title`, `scanning`, `nothing_found`, T-043 leftovers) from en/ru/et; added `TestI18nSymmetry` (no dead keys, ru/et key-sets == en).
+- README GUI section updated to the current five buttons (en/ru/et); wiki test count synced to 86.
+- New `background_clean_argv()` helper (frozen-aware) + 3 unit tests; 86 tests green, ruff clean.
+- Version bump to 2.4.15 (VERSION, pyproject, CHANGELOG).
+
+## v2.4.14
+- Added 12 new safe cache targets to `USER_APPDATA_TARGETS`: Windows Search DeviceSearchCache/AppIconCache, iTop Easy Desktop Thumbs, Freebuff Cache, AIChatter Edge Profile Cache, Telegram media_cache, Photoshop WebView Cache (Local), Adobe Bridge Code/GPU Cache, Ollama Shader Cache, Opera SW CacheStorage/ScriptCache (~400 MB found live).
+- Fixed `_deep_junk_sweep` guard bug: it used the rebound `self.guard` (last AppData target root), so every `is_safe` check failed and all deep-sweep items were silently skipped. Now uses its own C:\-rooted `SafetyGuard`.
+- Fixed Viber sweep path (was `LOCALAPPDATA/ViberPC/QmlWebCache`, real path is per-account under Roaming) — now globs `*/QmlWebCache` and `*/Thumbnails`.
+- Added Firefox system-profile cache sweep (startupCache/cache2/shader-cache/crashes/minidumps, skipped while firefox runs) and Explorer `ThumbCacheToDelete` cleanup.
+- Version bump to 2.4.14.
+
 ## v2.4.13
 - Removed dead `ProgressLogger.warn()` and `ProgressTracker.set_total()` (zero call sites).
 - Fixed duplicate `--time HH:MM` row in docs/CLI-Reference.md + wiki payload source.

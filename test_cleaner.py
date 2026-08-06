@@ -3,6 +3,7 @@
 
 import json
 import os
+import re
 import sys
 import tempfile
 import unittest
@@ -506,6 +507,25 @@ class TestPathHardening(unittest.TestCase):
 class TestCLIFunctions(unittest.TestCase):
     """Tests for CLI mode functions."""
 
+    def test_background_clean_argv_frozen(self):
+        with patch.object(vac.sys, "frozen", True, create=True):
+            argv = vac.background_clean_argv()
+        self.assertEqual(argv[0], vac.sys.executable)
+        for flag in ("--cli", "--all", "--delete", "--hidden"):
+            self.assertIn(flag, argv)
+
+    def test_background_clean_argv_pythonw(self):
+        with patch.object(vac.sys, "frozen", False, create=True):
+            argv = vac.background_clean_argv()
+        self.assertTrue(str(argv[0]).endswith("pythonw.exe"))
+        self.assertIn("--cli", argv)
+        self.assertIn("--delete", argv)
+        self.assertIn("--hidden", argv)
+
+    def test_default_strings_have_run_bg(self):
+        self.assertIn("run_bg", vac.DEFAULT_STRINGS)
+        self.assertTrue(vac.DEFAULT_STRINGS["run_bg"])
+
     def test_calculate_target_sizes_empty(self):
         """Returns empty dict when no targets enabled."""
         result = vac.calculate_target_sizes({})
@@ -649,11 +669,30 @@ class TestI18n(unittest.TestCase):
         s = vac.load_strings("ru")
         self.assertEqual(s["clean"], "Очистить")
         self.assertEqual(s["stop"], "Стоп")
-        self.assertEqual(s["find_new_junk"], "Find New Junk")
+        self.assertEqual(s["window_title"], "Smart VAC Cleaner")
 
     def test_missing_file_falls_back_to_english(self):
         s = vac.load_strings("et")
         self.assertEqual(s["clean"], "Clean")
+
+
+class TestI18nSymmetry(unittest.TestCase):
+    """i18n key-set guards (no fixture patching — reads real strings dir)."""
+
+    def test_no_dead_default_strings(self):
+        """Every DEFAULT_STRINGS key is referenced in source (no dead i18n)."""
+        src = Path(vac.__file__).read_text(encoding="utf-8")
+        refs = set(re.findall(r'self\.T\[["\'](\w+)["\']\]', src))
+        dead = set(vac.DEFAULT_STRINGS) - refs
+        self.assertEqual(dead, set())
+
+    def test_locale_key_sets_match_default(self):
+        """ru/et carry exactly the DEFAULT_STRINGS key set (no drift)."""
+        en = set(vac.DEFAULT_STRINGS)
+        for lang in ("ru", "et"):
+            path = vac.STRINGS_DIR / f"{lang}.json"
+            d = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(set(d), en, lang)
 
 
 if __name__ == "__main__":

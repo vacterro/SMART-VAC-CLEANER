@@ -57,7 +57,7 @@ import customtkinter as ctk
 
 
 
-VERSION = "2.4.12"
+VERSION = "2.4.15"
 
 DEFAULT_THREADS = 12
 
@@ -91,14 +91,13 @@ STRINGS_DIR = BASE_DIR / "strings"
 DEFAULT_STRINGS: dict[str, str] = {
     "clean": "Clean",
     "stop": "Stop",
-    "find_new_junk": "Find New Junk",
     "install_task": "Install Auto-Clean Task",
+    "run_bg": "Run in bg",
+    "run_bg_started": "Background clean started (hidden).",
+    "run_bg_running": "Background clean already running.",
     "window_title": "Smart VAC Cleaner",
     "confirm_title": "Confirm DELETE",
     "confirm_body": "Files will be permanently removed (no recycle bin).\n\nContinue?",
-    "junk_window_title": "Find New Junk",
-    "scanning": "Scanning...",
-    "nothing_found": "Nothing new found.",
     "cancelled": "Cancelled.",
     "cancelling": "Cancelling...",
     "task_dialog_title": "Auto-Clean Task",
@@ -375,6 +374,19 @@ USER_APPDATA_TARGETS.extend([
     (get_env_path("LOCALAPPDATA", r"C:\Temp") / "MaxonApp" / "UserData" / "EBWebView" / "Default" / "GrShaderCache", "MaxonApp WebView Shader Cache"),
     (get_env_path("APPDATA", r"C:\ProgramData") / "Adobe" / "Adobe Photoshop 2024" / "Logs", "Photoshop 2024 Logs"),
     (get_env_path("APPDATA", r"C:\ProgramData") / "obsidian" / "GPUCache", "Obsidian GPUCache"),
+    # New findings (v2.4.14)
+    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "Packages" / "Microsoft.Windows.Search_cw5n1h2txyewy" / "LocalState" / "DeviceSearchCache", "Windows Search DeviceSearchCache"),
+    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "Packages" / "Microsoft.Windows.Search_cw5n1h2txyewy" / "LocalState" / "AppIconCache", "Windows Search AppIconCache"),
+    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "iTop Easy Desktop" / "Thumb", "iTop Easy Desktop Thumbs"),
+    (get_env_path("APPDATA", r"C:\ProgramData") / "Freebuff" / "Cache", "Freebuff Cache"),
+    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "Photoshop1-25-WIN" / "EBWebView" / "Default" / "Cache", "Photoshop WebView Cache (Local)"),
+    (get_env_path("APPDATA", r"C:\ProgramData") / "Bridge" / "Code Cache", "Adobe Bridge Code Cache"),
+    (get_env_path("APPDATA", r"C:\ProgramData") / "Bridge" / "GPUCache", "Adobe Bridge GPUCache"),
+    (get_env_path("APPDATA", r"C:\ProgramData") / "ollama app.exe" / "EBWebView" / "GrShaderCache", "Ollama Shader Cache"),
+    (get_env_path("APPDATA", r"C:\ProgramData") / "AIChatter" / "profiles" / "edge" / "chatgpt" / "Default" / "Cache", "AIChatter Edge Profile Cache"),
+    (get_env_path("APPDATA", r"C:\ProgramData") / "Telegram Desktop" / "tdata" / "user_data" / "media_cache", "Telegram Media Cache (C:)"),
+    (get_env_path("APPDATA", r"C:\ProgramData") / "Opera Software" / "Opera Stable" / "Service Worker" / "CacheStorage", "Opera SW CacheStorage"),
+    (get_env_path("APPDATA", r"C:\ProgramData") / "Opera Software" / "Opera Stable" / "Service Worker" / "ScriptCache", "Opera SW ScriptCache"),
 ])
 
 
@@ -1431,6 +1443,12 @@ class SystemCleaner(CleanerEngine):
 
                         freed += self._del_file(item, f"Thumbnail Cache: {item.name}")
 
+                tcd = USER_EXPLORER / "ThumbCacheToDelete"
+
+                if tcd.is_dir() and guard.is_safe(tcd)[0]:
+
+                    freed += self._del_dir(tcd, "Thumbnail Cache: ThumbCacheToDelete")
+
             except OSError:
 
                 pass  # expected: thumbnail cache may be in use
@@ -1549,6 +1567,8 @@ class SystemCleaner(CleanerEngine):
 
         freed = 0
 
+        guard = SafetyGuard(Path("C:\\"))
+
         loc = get_env_path("LOCALAPPDATA", r"C:\Temp")
 
         prog = get_env_path("APPDATA", r"C:\ProgramData")
@@ -1561,7 +1581,7 @@ class SystemCleaner(CleanerEngine):
 
                 self.check_cancel()
 
-                if item.is_dir() and (item.name.endswith("-updater") or item.name.endswith("@")) and self.guard.is_safe(item)[0]:
+                if item.is_dir() and (item.name.endswith("-updater") or item.name.endswith("@")) and guard.is_safe(item)[0]:
 
                     freed += self._del_dir(item, f"Updater leftover: {item.name}")
 
@@ -1569,9 +1589,29 @@ class SystemCleaner(CleanerEngine):
 
             pass
 
-        # Viber QmlWebCache
+        # Viber QmlWebCache / Thumbnails (per-account subdir, under Roaming)
 
-        freed += self.safe_del_dir(loc / "ViberPC" / "QmlWebCache", "[Viber] QmlWebCache", "general")
+        try:
+
+            for vdir in (prog / "ViberPC").glob("*/QmlWebCache"):
+
+                self.check_cancel()
+
+                if guard.is_safe(vdir)[0]:
+
+                    freed += self._del_dir(vdir, f"[Viber] QmlWebCache: {vdir.parent.name}")
+
+            for vdir in (prog / "ViberPC").glob("*/Thumbnails"):
+
+                self.check_cancel()
+
+                if guard.is_safe(vdir)[0]:
+
+                    freed += self._del_dir(vdir, f"[Viber] Thumbnails: {vdir.parent.name}")
+
+        except OSError:
+
+            pass
 
         # leftover installer temps in %LOCALAPPDATA%
 
@@ -1581,7 +1621,7 @@ class SystemCleaner(CleanerEngine):
 
                 self.check_cancel()
 
-                if self.guard.is_safe(f)[0]:
+                if guard.is_safe(f)[0]:
 
                     freed += self._del_file(f, f"Installer temp: {f.name}")
 
@@ -1599,7 +1639,7 @@ class SystemCleaner(CleanerEngine):
 
                     self.check_cancel()
 
-                    if self.guard.is_safe(f)[0]:
+                    if guard.is_safe(f)[0]:
 
                         freed += self._del_file(f, desc.format(name=f.name))
 
@@ -1619,7 +1659,7 @@ class SystemCleaner(CleanerEngine):
 
                     self.check_cancel()
 
-                    if self.guard.is_safe(f)[0]:
+                    if guard.is_safe(f)[0]:
 
                         freed += self._del_file(f, desc.format(name=f.name))
 
@@ -1635,7 +1675,7 @@ class SystemCleaner(CleanerEngine):
 
                 self.check_cancel()
 
-                if self.guard.is_safe(f)[0]:
+                if guard.is_safe(f)[0]:
 
                     freed += self._del_file(f, f"FastPrompter bak: {f.name}")
 
@@ -1647,7 +1687,7 @@ class SystemCleaner(CleanerEngine):
 
         app_asar = loc / "AnthropicClaude" / "app.asar.bak"
 
-        if app_asar.is_file() and self.guard.is_safe(app_asar)[0]:
+        if app_asar.is_file() and guard.is_safe(app_asar)[0]:
 
             freed += self._del_file(app_asar, f"Claude app.asar.bak: {app_asar.name}")
 
@@ -1655,7 +1695,7 @@ class SystemCleaner(CleanerEngine):
 
         odis_log = prog / "Autodesk" / "ODIS" / "DDA.log"
 
-        if odis_log.is_file() and self.guard.is_safe(odis_log)[0]:
+        if odis_log.is_file() and guard.is_safe(odis_log)[0]:
 
             freed += self._del_file(odis_log, f"Autodesk ODIS log: {odis_log.name}")
 
@@ -1667,13 +1707,35 @@ class SystemCleaner(CleanerEngine):
 
                 self.check_cancel()
 
-                if self.guard.is_safe(f)[0]:
+                if guard.is_safe(f)[0]:
 
                     freed += self._del_file(f, f"GitHub CLI run-log: {f.name}")
 
         except OSError:
 
             pass
+
+        # Firefox system profile caches (profile dirs vary per machine)
+
+        if not is_app_running("firefox", self.running):
+
+            try:
+
+                for prof in (loc / "Mozilla" / "Firefox" / "Profiles").glob("*"):
+
+                    self.check_cancel()
+
+                    for sub in ["startupCache", "cache2", "shader-cache", "crashes", "minidumps"]:
+
+                        p = prof / sub
+
+                        if p.is_dir() and guard.is_safe(p)[0]:
+
+                            freed += self._del_dir(p, f"Firefox {sub}: {prof.name}")
+
+            except OSError:
+
+                pass
 
         return freed
 
@@ -2167,6 +2229,7 @@ class App(ctk.CTk):
         self.cancel_event = threading.Event()
         self._clean_in_progress = False
         self._clean_timer = None
+        self._bg_proc = None
         self._dashboard_after_id = None
         self.dash_cat_widgets = {}
         self._build_ui()
@@ -2194,6 +2257,9 @@ class App(ctk.CTk):
         row += 1
         self.btn_task = ctk.CTkButton(side, text=self.T["install_task"], font=native_font, fg_color=WIN95_BUTTON, hover_color=WIN95_BUTTON_HOVER, text_color=WIN95_ACCENT, corner_radius=Z, border_width=2, border_color=BEVEL_RAISED, command=self._install_scheduled_task)
         self.btn_task.grid(row=row, column=0, pady=4, padx=10, sticky="ew")
+        row += 1
+        self.btn_bg = ctk.CTkButton(side, text=self.T["run_bg"], font=native_font, fg_color=WIN95_BUTTON, hover_color=WIN95_BUTTON_HOVER, text_color=WIN95_ACCENT, corner_radius=Z, border_width=2, border_color=BEVEL_RAISED, command=self._run_bg)
+        self.btn_bg.grid(row=row, column=0, pady=4, padx=10, sticky="ew")
         row += 1
         self.btn_exc = ctk.CTkButton(side, text=self.T["exclusions"], font=native_font, fg_color=WIN95_BUTTON, hover_color=WIN95_BUTTON_HOVER, text_color=WIN95_ACCENT, corner_radius=Z, border_width=2, border_color=BEVEL_RAISED, command=self._open_exclusions)
         self.btn_exc.grid(row=row, column=0, pady=4, padx=10, sticky="ew")
@@ -2388,6 +2454,27 @@ class App(ctk.CTk):
         except Exception as e:
             logging.getLogger("vac_cleaner").warning(f"Failed to install scheduled task: {e}")
 
+    def _run_bg(self):
+        if self._bg_proc is not None and self._bg_proc.poll() is None:
+            self._log(self.T["run_bg_running"])
+            return
+        flags = 0
+        for f in ("DETACHED_PROCESS", "CREATE_NEW_PROCESS_GROUP", "CREATE_NO_WINDOW"):
+            flags |= getattr(subprocess, f, 0)
+        try:
+            self._bg_proc = subprocess.Popen(
+                background_clean_argv(),
+                cwd=str(BASE_DIR),
+                close_fds=True,
+                creationflags=flags,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except OSError as e:
+            self._log(f"Error: {e}")
+            return
+        self._log(self.T["run_bg_started"])
+
     def _open_exclusions(self):
         win = ctk.CTkToplevel(self)
         win.title(self.T["exc_title"])
@@ -2471,6 +2558,13 @@ def scheduled_task_command() -> str:
         return f'"{sys.executable}" --cli --all --delete --hidden'
     pythonw = _get_pythonw()
     return f'"{pythonw}" "{SCRIPT_PATH}" --cli --all --delete --hidden'
+
+
+def background_clean_argv() -> list[str]:
+    """Argv for a detached silent background full-clean (no console, no GUI)."""
+    if getattr(sys, "frozen", False):
+        return [sys.executable, "--cli", "--all", "--delete", "--hidden"]
+    return [_get_pythonw(), str(SCRIPT_PATH), "--cli", "--all", "--delete", "--hidden"]
 
 
 def install_task(time_str: str) -> None:

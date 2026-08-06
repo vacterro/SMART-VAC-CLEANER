@@ -1,4 +1,4 @@
-# Build & Install
+﻿# Build & Install
 
 ## Requirements
 
@@ -50,7 +50,7 @@ tag, CI builds and uploads the exe as an artifact automatically.
 python -m pytest -q
 ```
 
-Runs offline, touches only temp directories (81 tests).
+Runs offline, touches only temp directories (86 tests).
 
 ## CI
 

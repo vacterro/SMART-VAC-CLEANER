@@ -68,8 +68,9 @@ peale ehitab CI exe ja laeb selle artefaktina automaatselt üles.
 python _SMART_VAC_CLEANER.py
 ```
 
-Neli nuppu: **Puhasta** (päris kustutamine — küsib eelnevalt kinnitust),
-**Peata**, **Paigalda autopuhastuse ülesanne**, **Välistused** (ära-kustuta
+Viis nuppu: **Puhasta** (päris kustutamine — küsib eelnevalt kinnitust),
+**Peata**, **Paigalda autopuhastuse ülesanne**, **Käivita taustal** (käivitab
+eraldiseisva peidetud täispuhastuse taustal), **Välistused** (ära-kustuta
 mustrite ja teede muutmine). Progressiribad kategooriate kaupa, täielik
 logiakken; iga käivitus jõuab ka `logs\clean_*.log` faili.
 
