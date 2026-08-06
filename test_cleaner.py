@@ -534,7 +534,7 @@ class TestCLIFunctions(unittest.TestCase):
         mock_parse.return_value = MagicMock(
             dry_run=False, delete=False,
             portable=False, system=False, custom=False, all=False,
-            cli=False, status=False, hidden=False, sys_targets="",
+            cli=False, status=False, analyze_caches=False, hidden=False, sys_targets="",
             exclude="", install_task=False, time="09:00",
         )
         # main() should go to GUI path (App()), not CLI
@@ -574,7 +574,7 @@ class TestCLIFunctions(unittest.TestCase):
         mock_parse.return_value = MagicMock(
             dry_run=False, delete=False,
             portable=True, system=False, custom=False, all=False,
-            cli=False, status=False, hidden=False, sys_targets="",
+            cli=False, status=False, analyze_caches=False, hidden=False, sys_targets="",
             exclude="", install_task=False, time="09:00",
         )
         with patch.object(vac, "run_cleaning_job") as mock_job, patch.object(vac, "Logger"):
@@ -588,7 +588,7 @@ class TestCLIFunctions(unittest.TestCase):
         mock_parse.return_value = MagicMock(
             dry_run=False, delete=True,
             portable=True, system=True, custom=True, all=False,
-            cli=False, status=False, hidden=False, sys_targets="",
+            cli=False, status=False, analyze_caches=False, hidden=False, sys_targets="",
             exclude="", install_task=False, time="09:00",
         )
         with patch.object(vac, "run_cleaning_job") as mock_job, patch.object(vac, "Logger"):
@@ -602,7 +602,7 @@ class TestCLIFunctions(unittest.TestCase):
         mock_parse.return_value = MagicMock(
             dry_run=True, delete=True,
             portable=True, system=False, custom=False, all=False,
-            cli=False, status=False, hidden=False, sys_targets="",
+            cli=False, status=False, analyze_caches=False, hidden=False, sys_targets="",
             exclude="", install_task=False, time="09:00",
         )
         with patch.object(vac, "run_cleaning_job") as mock_job, patch.object(vac, "Logger"):
@@ -616,7 +616,7 @@ class TestCLIFunctions(unittest.TestCase):
         mock_parse.return_value = MagicMock(
             dry_run=False, delete=True,
             portable=True, system=False, custom=False, all=False,
-            cli=False, status=False, hidden=True, sys_targets="",
+            cli=False, status=False, analyze_caches=False, hidden=True, sys_targets="",
             exclude="", install_task=False, time="09:00",
         )
         with patch.object(vac, "run_cleaning_job") as mock_job, patch.object(vac, "Logger"), patch.object(vac, "_hide_console") as mock_hide:

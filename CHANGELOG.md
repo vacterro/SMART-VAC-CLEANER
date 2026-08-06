@@ -1,5 +1,12 @@
 # Changelog
 
+## v2.4.11
+- Added 14 new safe cache paths to `USER_APPDATA_TARGETS` discovered via `--analyze-caches` / deep scan: DriveFS Logs (Local), Razer Engine Cache/Code/GPU/Service Worker, Epic webcache (Local), VS Code WebStorage CacheStorage, VerifiedSkill CRX Cache, MaxonApp WebView Cache/Code/Shader, Photoshop 2024 Logs, Obsidian GPUCache (~2.2 GB on this machine).
+- Fixed dead `--analyze-caches` flag: `main()` now dispatches to `analyze_caches.main()` (flag was parsed but never executed).
+- Test mocks updated for the new flag; 81 tests green, ruff clean.
+- saiwiki docs refresh applied: CLI Reference (+`--analyze-caches`), Configuration (+`window_geometry`), Home/Build (100+ targets, 81 tests).
+- Version bump to 2.4.11 (VERSION, pyproject, CHANGELOG).
+
 ## v2.4.10
 - Fixed doc drift: updated "60+ AppData targets" to "100+ AppData targets" across `README.md`, `README.ru.md`, `README.et.md`, `docs/Home.md`.
 - Added native CLI `--analyze-caches` flag to discover AppData cache folders > 5 MB directly via console.

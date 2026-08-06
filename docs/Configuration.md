@@ -10,7 +10,8 @@ on first run, with defaults.
   "exclude_patterns": ["*.db"],
   "exclude_paths": ["C:\\Users\\me\\AppData\\Local\\Important"],
   "auto_clean_interval_hours": 0,
-  "lang": "en"
+  "lang": "en",
+  "window_geometry": ""
 }
 ```
 
@@ -25,6 +26,9 @@ on first run, with defaults.
 - `auto_clean_interval_hours` — GUI auto-reclean interval; `0` = off.
 - `lang` — GUI language: `en`, `ru`, or `et`; any missing string falls back
   to English. Read at GUI start.
+- `window_geometry` — last GUI window size/position, saved on close and
+  restored on start; `""` means the default geometry (clamped to a minimum
+  of 800x500).
 
 ## Canonicalization (on load)
 

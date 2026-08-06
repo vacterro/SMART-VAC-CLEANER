@@ -57,7 +57,7 @@ import customtkinter as ctk
 
 
 
-VERSION = "2.4.10"
+VERSION = "2.4.11"
 
 DEFAULT_THREADS = 12
 
@@ -383,6 +383,21 @@ USER_APPDATA_TARGETS.extend([
     (get_env_path("APPDATA", r"C:\ProgramData") / "SiYuan-Electron" / "GPUCache", "SiYuan GPUCache"),
     (get_env_path("APPDATA", r"C:\ProgramData") / "BetterDiscord Installer" / "Cache", "BetterDiscord Cache"),
     (get_env_path("APPDATA", r"C:\ProgramData") / "BorisFX" / "BorisFX Direct" / "Cache", "BorisFX Direct Cache"),
+    # New findings (v2.4.10)
+    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "Google" / "DriveFS" / "Logs", "DriveFS Logs (Local)"),
+    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "Razer" / "RazerAppEngine" / "User Data" / "Default" / "Cache", "Razer Engine Cache"),
+    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "Razer" / "RazerAppEngine" / "User Data" / "Default" / "Code Cache", "Razer Engine Code Cache"),
+    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "Razer" / "RazerAppEngine" / "User Data" / "Default" / "GPUCache", "Razer Engine GPUCache"),
+    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "Razer" / "RazerAppEngine" / "User Data" / "Default" / "Service Worker", "Razer Engine Service Worker"),
+    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "EpicGamesLauncher" / "Saved" / "webcache_4430", "Epic webcache (Local)"),
+    (get_env_path("APPDATA", r"C:\ProgramData") / "Code" / "WebStorage" / "2" / "CacheStorage", "VS Code WebStorage Cache"),
+    (get_env_path("APPDATA", r"C:\ProgramData") / "Code" / "WebStorage" / "3" / "CacheStorage", "VS Code WebStorage Cache (2)"),
+    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "com.verifiedskill.desktop" / "EBWebView" / "component_crx_cache", "VerifiedSkill CRX Cache"),
+    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "MaxonApp" / "UserData" / "EBWebView" / "Default" / "Cache", "MaxonApp WebView Cache"),
+    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "MaxonApp" / "UserData" / "EBWebView" / "Default" / "Code Cache", "MaxonApp WebView Code Cache"),
+    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "MaxonApp" / "UserData" / "EBWebView" / "Default" / "GrShaderCache", "MaxonApp WebView Shader Cache"),
+    (get_env_path("APPDATA", r"C:\ProgramData") / "Adobe" / "Adobe Photoshop 2024" / "Logs", "Photoshop 2024 Logs"),
+    (get_env_path("APPDATA", r"C:\ProgramData") / "obsidian" / "GPUCache", "Obsidian GPUCache"),
 ])
 
 
@@ -2472,6 +2487,12 @@ def main():
     # ── status ────────────────────────────────────────────────────────────────
     if args.status:
         cli_status()
+        return
+
+    # ── analyze-caches ─────────────────────────────────────────────────────────
+    if args.analyze_caches:
+        from analyze_caches import main as analyze_caches_main
+        analyze_caches_main()
         return
 
     # в”Ђв”Ђ CLI / scheduled mode в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ

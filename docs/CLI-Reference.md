@@ -12,10 +12,9 @@ Add `--delete` to actually remove files. `--dry-run` forces preview even when
 | `--delete` | **Real delete** (without it the run is a dry-run preview) |
 | `--dry-run` | Force preview even with `--delete` |
 | `--status` | Show how much junk exists per target; nothing is deleted |
-| `--analyze-caches` | Discover AppData cache folders > 5 MB |
+| `--analyze-caches` | Scan `%LOCALAPPDATA%`/`%APPDATA%` for cache/temp/log/crash folders over 5 MB and print the biggest -- cache discovery for auditing, nothing is deleted |
 | `--sys-targets` | Comma list of system targets to force-enable (`System Temp`, `User Temp`, ...) |
-| `--exclude` / `--exclude-patterns` | Comma list of extra exclude patterns (`--exclude "*.db,*.tmp"`) |
-| `--exclude-paths` | Comma list of extra exclude path prefixes |
+| `--exclude` | Comma list of extra exclude patterns (`--exclude "*.db,*.tmp"`) |
 | `--hidden` | Hide console window (used by Task Scheduler) |
 | `--install-task` | Register the daily silent full-clean task |
 | `--time HH:MM` | Start time for the scheduled task (default `09:00`) |
