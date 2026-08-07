@@ -1,6 +1,6 @@
 # Smart VAC Cleaner
 
-![Smart VAC Cleaner GUI](../assets/screenshot.png)
+![Smart VAC Cleaner GUI](assets/screenshot.png)
 
 Kaasaskantav, ohutu, kaasaegne prügipuhastaja Windowsile. GUI + CLI + Tegumihaldur.
 

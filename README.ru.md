@@ -1,6 +1,6 @@
 # Smart VAC Cleaner
 
-![Интерфейс Smart VAC Cleaner](../assets/screenshot.png)
+![Интерфейс Smart VAC Cleaner](assets/screenshot.png)
 
 Портативный, безопасный, современный очиститель мусора для Windows. GUI + CLI + Планировщик задач.
 
