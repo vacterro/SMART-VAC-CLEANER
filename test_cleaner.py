@@ -560,12 +560,15 @@ class TestPortableSweep(unittest.TestCase):
             self.assertEqual(log.n_deleted, 0)
 
     def test_old_opera_versions_keep_latest(self):
+        # Environment-independent: the opera gate must not depend on whether
+        # Opera happens to be running on the machine right now.
         with tempfile.TemporaryDirectory() as tmp:
             root = self._deep_root(tmp)
             for ver in ["120.0.1.0", "120.0.2.0", "121.0.3.0"]:
                 (root / ver).mkdir()
             cleaner, log = self._cleaner(root)
-            cleaner._clean_old_opera_versions(root)
+            with patch.object(vac, "is_app_running", return_value=False):
+                cleaner._clean_old_opera_versions(root)
             self.assertFalse((root / "120.0.1.0").exists())
             self.assertFalse((root / "120.0.2.0").exists())
             self.assertTrue((root / "121.0.3.0").exists())
