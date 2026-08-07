@@ -22,14 +22,18 @@ Missing drives are silently skipped, never errors.
 
 ## Safety (defense in depth)
 
-- **Dry-run by default** — GUI "Clean" is real delete (with a confirm dialog), the CLI needs `--delete` explicitly
+- **Dry-run is physically read-only** — GUI "Clean" is real delete (with a confirm dialog), the CLI needs `--delete` explicitly; a dry-run plans but never mutates (no unlink/chmod/rmdir, no DNS flush, no service stop, no recycle-bin call)
 - **Blacklist**: `C:\`, `C:\Windows`, `USERPROFILE`, Program Files, the script's own folder — a protected root and every descendant under it is never touched, even by custom rules
+- **No hardcoded portable roots**: fresh config defaults to `portable_roots: []`
 - **Min path depth**: shallow paths (fewer than 5 parts) are refused
-- **Running-process check**: apps using a target are skipped (per-app process lists); if the process table can't be queried, app-sensitive targets are skipped too (fail closed)
+- **Running-process check**: apps using a target are skipped (per-app process lists); if the process table can't be queried, app-sensitive targets are skipped too (fail closed); the snapshot is refreshed before each destructive app group
+- **Owner coverage**: every AppData target has a verified process owner or is explicitly process-agnostic (shared package/compiler/driver caches) — no implicit `owner=None` escape hatch
 - **Symlinks / junctions / reparse points refused**, `..` traversal refused
-- **Never-delete names**: `login data`, `bookmarks`, `cookies`, `history`, `trusted_vault.pb`, and more — including numbered (`Cookies (2)`) and journal (`-wal`/`-shm`) variants
+- **Never-delete names**: `login data`, `bookmarks`, `cookies`, `history`, `trusted_vault.pb`, and more — numbered (`Cookies (2)`) and compound journal (`Cookies (2)-wal`) variants reduce mechanically to the protected base
 - **Exclusions**: `exclude_patterns` / `exclude_paths` in config apply to every deletion (portable, system, custom, deep sweep)
+- **Backup files**: generic `.bak` rollback artifacts are never auto-deleted
 - All deletes go through a `SafetyGuard` per root; every node under a deleted directory is validated, so protected/excluded subtrees survive; counters advance only after a verified delete; errors are counted, never fatal
+- GUI worker threads never touch Tk; closing during a clean cancels and waits for the worker before exiting
 
 ## Requirements
 

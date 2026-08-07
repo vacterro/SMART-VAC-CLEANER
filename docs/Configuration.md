@@ -5,7 +5,7 @@ on first run, with defaults.
 
 ```json
 {
-  "portable_roots": ["D:\\Portable"],
+  "portable_roots": [],
   "custom_rules": [{"path": "D:\\Apps\\TestApp", "pattern": "*.log"}],
   "exclude_patterns": ["*.db"],
   "exclude_paths": ["C:\\Users\\me\\AppData\\Local\\Important"],
@@ -22,7 +22,9 @@ on first run, with defaults.
   copies (`Name (2)`) are only removed when the base name is a proven
   cache/temp/log/crash artifact — profile-data backups such as `Login Data (2)`
   or `History (3)` are always kept. Anything not matching junk patterns is
-  untouched.
+  untouched. A fresh config defaults to `[]` — no personal portable roots are
+  hardcoded; add your own folders (a root under `C:\`, `C:\Windows`,
+  `USERPROFILE`, Program Files, or the cleaner's own folder is rejected).
 - `custom_rules` — `path` (folder) + `pattern` (glob, `*` = whole contents).
 - `exclude_patterns` — fnmatch patterns, applied to every deletion.
 - `exclude_paths` — exact paths never touched.

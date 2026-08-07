@@ -1,5 +1,19 @@
 # Changelog
 
+## Hardening (unreleased)
+- **Safety hardening (data-loss fixes)**
+  - **Dry-run is physically read-only**: deletion split into a pure read-only planning phase and an apply phase that runs only in real-delete mode. A dry-run performs no unlink/chmod/rmdir, no DNS flush, no service stop/start, no recycle-bin call (mutation-tripwire + byte-identical snapshot tests).
+  - FreeFileSync cache target retargeted to the explicit `Logs` child; `GlobalSettings.xml` / `LastRun.ffs_*` protected. Numbered copies are explicit junk-only; `Cookies (2)` / `Login Data (3)` / `History (3)` survive.
+  - Exclusions are a global invariant (every guard inherits engine exclusions; CLI merges config + `--exclude`). Guarded recursive deletion validates every node; protected/excluded subtrees survive.
+  - Browser allowlists shrunk (SW/Database, `passkey_enclave_state`, `trusted_vault.pb`, `P3AConfig`, Firefox session/state removed); explicit-name never-delete, no fuzzy matching; compound names (`Cookies (2)-journal`) reduce mechanically.
+  - Broad AppData roots quarantined (CEF, DaVinci Resolve Welcome, Razer Service Worker, NVIDIA PerDriverVersion); Epic webcache session/database data protected.
+- **Invariants**: `--all`/GUI/scheduled use safe system-target defaults (Recycle Bin/DNS/Windows Update only via explicit `--sys-targets`); process detection fails closed (UNKNOWN → skip); every AppData target is owned or explicitly process-agnostic (no `owner=None` escape hatch); blacklist rejects roots + descendants; symlinks/junctions/reparse refused; delete counters advance only after verified success; cancellation checked during discovery/submit/mutation.
+- **Windows Update cache purge is transaction-safe**: original service state queried, stopped only if running, verified before deletion (failure → skip), restored in `finally` on success/error/cancel; originally-stopped service never started; dry-run does zero service mutation.
+- **Portable roots**: hardcoded `PRIMARY_ROOT`/`BACKUP_ROOTS` removed; fresh config defaults to `portable_roots: []` (existing user roots untouched).
+- **Cleanup policy**: generic `.bak` rollback files are never auto-deleted; universal (BFS) sweeper refuses discovered caches under unknown app ownership in real-delete mode.
+- **GUI lifecycle**: worker threads never touch Tk (queue + completion event only; one main-thread poller); closing during a clean cancels and destroys only after the worker terminates.
+- Shared dependency-free `_fs_helpers` (get_size dedup), canonical `clean_argv()` builder, dead symbols removed, `ded` locale in i18n symmetry, docs synced. 159 tests green, ruff clean.
+
 ## v2.4.16
 - i18n: Added angry-grandpa (`Дед`) voice UI localization (`strings/ded.json`) and translated `README.ded.md`.
 - Updated language switcher across all READMEs (`en`, `ru`, `et`, `ded`) and appended source-digest to locales.

@@ -50,7 +50,7 @@ tag, CI builds and uploads the exe as an artifact automatically.
 python -m pytest -q
 ```
 
-Runs offline, touches only temp directories (125 tests).
+Runs offline, touches only disposable temp directories (automated regression suite).
 
 ## CI
 

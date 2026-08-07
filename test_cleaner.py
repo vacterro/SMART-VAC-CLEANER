@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
 """Unit tests for _SMART_VAC_CLEANER.py core functions."""
 
+import hashlib
 import json
+import logging
 import os
+import queue
 import re
 import sys
 import tempfile
 import threading
 import unittest
 from pathlib import Path
+from typing import ClassVar
 from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -119,6 +123,33 @@ class TestConfigPersistence(unittest.TestCase):
         self.assertEqual(vac.parse_geometry("400x300+0+0"), "800x500+0+0")
 
 
+class TestPortableRootPolicy(unittest.TestCase):
+    """T-096: no hardcoded personal portable roots; fresh default is empty."""
+
+    def test_fresh_default_roots_empty(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.object(vac, "CONFIG_FILE", Path(tmp) / "cleaner_config.json"):
+            self.assertEqual(vac.load_config()["portable_roots"], [])
+
+    def test_configured_roots_round_trip_intact(self):
+        """Existing user-configured roots must survive a load/rewrite cycle."""
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = Path(tmp) / "cleaner_config.json"
+            cfg.write_text(json.dumps({
+                "portable_roots": ["D:\\Portable\\Apps", "E:\\Tools\\Portable"],
+                "custom_rules": [], "exclude_patterns": [], "exclude_paths": [],
+            }), encoding="utf-8")
+            with patch.object(vac, "CONFIG_FILE", cfg):
+                data = vac.load_config()
+                self.assertEqual(data["portable_roots"], ["D:\\Portable\\Apps", "E:\\Tools\\Portable"])
+
+    def test_source_has_no_personal_drive_constants(self):
+        src = Path(vac.__file__).read_text(encoding="utf-8")
+        self.assertNotIn("___VAC", src)
+        self.assertNotIn("__SAVE_G", src)
+        self.assertNotIn("PRIMARY_ROOT", src)
+        self.assertNotIn("BACKUP_ROOTS", src)
+
+
 class TestUserAppdataTargets(unittest.TestCase):
 
     def test_new_safe_targets_present(self):
@@ -136,6 +167,13 @@ class TestUserAppdataTargets(unittest.TestCase):
             self.assertTrue(d)
             if owner is not None:
                 self.assertIn(owner, vac.APP_PROCESSES)
+
+    def test_every_target_owned_or_process_agnostic(self):
+        """T-092: no implicit owner=None escape hatch. Every entry is either
+        owned by a verified process group or explicitly PROCESS_AGNOSTIC."""
+        for p, d, owner in vac.USER_APPDATA_TARGETS:
+            ok = (owner is not None and owner in vac.APP_PROCESSES) or d in vac.PROCESS_AGNOSTIC_TARGETS
+            self.assertTrue(ok, f"{d}: owner={owner} not in APP_PROCESSES and not PROCESS_AGNOSTIC")
 
     def test_targets_no_duplicate_paths(self):
         paths = [str(p.resolve()) for p, _, _ in vac.USER_APPDATA_TARGETS]
@@ -492,6 +530,23 @@ class TestPortableSweep(unittest.TestCase):
             variants = vac._name_variants(name.lower())
             self.assertTrue(any(v in vac.NEVER_DELETE_NAMES for v in variants), name)
 
+    def test_name_variants_compound_fixed_point(self):
+        """T-097: compound 'numbered + journal tail' names reduce to the base."""
+        for name in ["cookies (2)-journal", "login data (3)-wal", "history (2)-shm",
+                     "bookmarks (4)-old", "preferences (2)-journal",
+                     "network persistent state (3)-wal", "affiliation database (2)-journal"]:
+            variants = vac._name_variants(name.lower())
+            self.assertIn(name.lower(), variants, name)
+            base = re.sub(r" \(\d+\)", "", re.sub(r"-(?:journal|wal|shm|old|bak)$", "", name)).lower()
+            self.assertIn(base, variants, name)
+            self.assertTrue(any(v in vac.NEVER_DELETE_NAMES for v in variants), name)
+
+    def test_name_variants_no_fuzzy_substrings(self):
+        """T-097: only mechanical suffix rules; no substring guessing."""
+        for name in ["cache", "code cache", "gpucache", "logs", "cache (2)"]:
+            variants = vac._name_variants(name.lower())
+            self.assertFalse(any(v in vac.NEVER_DELETE_NAMES for v in variants), name)
+
     def test_numbered_copies_skipped_when_running(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = self._deep_root(tmp)
@@ -516,21 +571,45 @@ class TestPortableSweep(unittest.TestCase):
             self.assertTrue((root / "121.0.3.0").exists())
             self.assertEqual(log.n_deleted, 2)
 
-    def test_universal_cache_sweep(self):
+    def test_universal_cache_sweep_verified_owner(self):
+        """T-098: discovered cache under a verified portable app dir is swept."""
         with tempfile.TemporaryDirectory() as tmp:
             root = self._deep_root(tmp)
-            cache = root / "App" / "Cache"
-            keep = root / "App" / "Config"
+            cache = root / "_CENT" / "User Data" / "Default" / "Cache"
+            keep = root / "_CENT" / "User Data" / "Config"
             cache.mkdir(parents=True)
             keep.mkdir(parents=True)
             (cache / "junk.bin").write_bytes(b"x" * 100)
             (keep / "settings.ini").write_text("keep")
             cleaner, log = self._cleaner(root)
-            cleaner.clean_universal_caches()
-            self.assertTrue(cache.exists())
+            with patch.object(vac, "get_running_processes", return_value=set()):
+                cleaner.clean_universal_caches()
             self.assertFalse((cache / "junk.bin").exists())
             self.assertTrue(keep.exists())
             self.assertGreater(log.n_deleted, 0)
+
+    def test_universal_cache_sweep_unknown_owner_skipped_in_delete(self):
+        """T-098: a discovered cache with no verified owner is NEVER deleted."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._deep_root(tmp)
+            cache = root / "App" / "Cache"
+            cache.mkdir(parents=True)
+            (cache / "junk.bin").write_bytes(b"x" * 100)
+            cleaner, log = self._cleaner(root)
+            with patch.object(vac, "get_running_processes", return_value=set()):
+                cleaner.clean_universal_caches()
+            self.assertTrue((cache / "junk.bin").exists(), "unknown-owner cache must survive in delete mode")
+            self.assertEqual(log.n_deleted, 0)
+
+    def test_universal_cache_owner_resolution(self):
+        """T-098: _universal_owner_for maps known portable app dirs."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._deep_root(tmp)
+            cleaner, _ = self._cleaner(root)
+            self.assertEqual(cleaner._universal_owner_for(root / "_CENT" / "x" / "Cache"), "cent")
+            self.assertEqual(cleaner._universal_owner_for(root / "_TG" / "tdata" / "cache"), "telegram")
+            self.assertEqual(cleaner._universal_owner_for(root / "__SOFT" / "_BRAVE" / "data" / "Cache"), "brave")
+            self.assertIsNone(cleaner._universal_owner_for(root / "UnknownApp" / "Cache"))
 
     def test_chromium_profile_protects_login_data(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -787,8 +866,300 @@ class TestI18n(unittest.TestCase):
         self.assertEqual(s["clean"], "Clean")
 
 
+def snapshot_tree(root: Path) -> dict:
+    """Relpath -> (size, sha256) for every file under root (sorted)."""
+    snap = {}
+    for dirpath, _dirs, files in os.walk(root):
+        for name in files:
+            p = Path(dirpath) / name
+            rel = str(p.relative_to(root))
+            snap[rel] = (p.stat().st_size, hashlib.sha256(p.read_bytes()).hexdigest())
+    return {k: snap[k] for k in sorted(snap)}
+
+
+class _ExplodeMutations:
+    """Context manager: every filesystem mutation primitive raises AssertionError."""
+
+    _PATCH_TARGETS: ClassVar[list[str]] = [
+        "pathlib.Path.unlink",
+        "pathlib.Path.rmdir",
+        "pathlib.Path.chmod",
+        "os.remove",
+        "os.rmdir",
+        "shutil.rmtree",
+    ]
+
+    def _resolve(self, dotted):
+        obj = __import__(dotted.split(".", 1)[0])
+        for part in dotted.split(".")[1:]:
+            obj = getattr(obj, part)
+        return obj
+
+    def __enter__(self):
+        self._patches = []
+        for target in self._PATCH_TARGETS:
+            holder = self._resolve(target.rsplit(".", 1)[0])
+            attr = target.rsplit(".", 1)[1]
+            orig = getattr(holder, attr)
+            self._patches.append((holder, attr, orig))
+            def _boom(*a, _t=target, **k):
+                raise AssertionError(f"dry-run MUST NOT mutate: {_t} called")
+            setattr(holder, attr, _boom)
+        return self
+
+    def __exit__(self, *exc):
+        for holder, attr, orig in self._patches:
+            setattr(holder, attr, orig)
+        return False
+
+
+class TestDryRunPurity(unittest.TestCase):
+    """T-090: dry-run is physically read-only (planning never mutates)."""
+
+    def _make(self):
+        """Return (TemporaryDirectory, root). Caller must .cleanup() after the context."""
+        return tempfile.TemporaryDirectory()
+
+    def test_repro_regression_dir(self):
+        """The T-090 reproduction: dry-run must leave file+dir untouched."""
+        with tempfile.TemporaryDirectory() as tmp:
+            t = Path(tmp) / "app"
+            t.mkdir()
+            (t / "a.bin").write_bytes(b"x" * 100)
+            log = vac.Logger(log_file=None, dry_run=True)
+            c = vac.CleanerEngine(True, log, vac.SafetyGuard(Path(tmp), is_system_root=True), Path(tmp))
+            c._del_dir(t, "app")
+            self.assertTrue((t / "a.bin").exists())
+            self.assertTrue(t.exists())
+
+    def _tripwire(self, body):
+        tmp = tempfile.TemporaryDirectory()
+        try:
+            with _ExplodeMutations():
+                body(Path(tmp.name))
+        finally:
+            tmp.cleanup()
+
+    def test_tripwire_del_file(self):
+        def body(root):
+            f = root / "f.bin"
+            f.write_bytes(b"x" * 10)
+            log = vac.Logger(log_file=None, dry_run=True)
+            c = vac.CleanerEngine(True, log, vac.SafetyGuard(root, is_system_root=True), root)
+            freed = c._del_file(f, "f")
+            self.assertEqual(freed, 10)
+            self.assertTrue(f.exists())
+        self._tripwire(body)
+
+    def test_tripwire_del_dir(self):
+        def body(root):
+            app = root / "app"
+            (app / "deep" / "sub").mkdir(parents=True)
+            (app / "a.bin").write_bytes(b"x" * 50)
+            (app / "deep" / "b.bin").write_bytes(b"y" * 30)
+            (app / "deep" / "sub" / "c.txt").write_text("hello")
+            log = vac.Logger(log_file=None, dry_run=True)
+            c = vac.CleanerEngine(True, log, vac.SafetyGuard(root, is_system_root=True), root)
+            freed = c._del_dir(app, "app")
+            self.assertEqual(freed, 85)
+            self.assertTrue((app / "deep" / "sub" / "c.txt").exists())
+        self._tripwire(body)
+
+    def test_tripwire_del_dir_contents(self):
+        def body(root):
+            target = root / "junk"
+            target.mkdir()
+            for i in range(6):
+                (target / f"f{i}.bin").write_bytes(b"x" * 10)
+            log = vac.Logger(log_file=None, dry_run=True)
+            c = vac.CleanerEngine(True, log, vac.SafetyGuard(root, is_system_root=True), root)
+            freed = c._del_dir_contents(target, "junk")
+            self.assertEqual(freed, 60)
+            for i in range(6):
+                self.assertTrue((target / f"f{i}.bin").exists())
+        self._tripwire(body)
+
+    def test_tripwire_portable_cleaner(self):
+        def body(root):
+            profile = root / "_CENT" / "User Data" / "Default"
+            (profile / "Cache").mkdir(parents=True)
+            (profile / "Cache" / "data_0").write_bytes(b"x" * 20)
+            (profile / "Login Data").write_text("secrets")
+            log = vac.Logger(log_file=None, dry_run=True)
+            with patch.object(vac, "get_running_processes", return_value=set()):
+                c = vac.PortableCleaner(True, log, vac.SafetyGuard(root, is_system_root=True), root)
+                c.run_all()
+            self.assertTrue((profile / "Cache" / "data_0").exists())
+            self.assertTrue((profile / "Login Data").exists())
+        self._tripwire(body)
+
+    def test_tripwire_system_cleaner(self):
+        def body(root):
+            target = root / "Cache"
+            target.mkdir()
+            (target / "f.bin").write_bytes(b"x" * 20)
+            targets = {k: False for k in vac.SYSTEM_TARGET_DEFAULTS}
+            targets["FreeFileSync Logs"] = True
+            with patch.object(vac, "USER_APPDATA_TARGETS", [(target, "FreeFileSync Logs", "freefilesync")]):
+                log = vac.Logger(log_file=None, dry_run=True)
+                with patch.object(vac, "get_running_processes", return_value=set()):
+                    c = vac.SystemCleaner(True, log, targets=targets)
+                    c.run_all()
+            self.assertTrue((target / "f.bin").exists())
+        self._tripwire(body)
+
+    def test_tripwire_custom_cleaner(self):
+        def body(root):
+            (root / "keep").mkdir()
+            (root / "keep" / "f.bin").write_bytes(b"x" * 20)
+            rules = [{"path": str(root), "pattern": "*"}]
+            log = vac.Logger(log_file=None, dry_run=True)
+            c = vac.CustomCleaner(True, log, rules)
+            c.run_all()
+            self.assertTrue((root / "keep" / "f.bin").exists())
+        self._tripwire(body)
+
+    def test_tripwire_cli_all(self):
+        """--all --dry-run --delete: zero mutation calls end to end."""
+        def body(root):
+            portable = root / "portable"
+            (portable / "_CENT" / "User Data" / "Default" / "Cache").mkdir(parents=True)
+            (portable / "_CENT" / "User Data" / "Default" / "Cache" / "data_0").write_bytes(b"x" * 20)
+            safe_defaults = {k: False for k in vac.SYSTEM_TARGET_DEFAULTS}
+            try:
+                with patch.object(vac, "SYSTEM_TARGET_DEFAULTS", safe_defaults), \
+                     patch.object(vac, "BASE_DIR", root), \
+                     patch.object(vac, "load_config", return_value={
+                         "portable_roots": [str(portable)], "custom_rules": [],
+                         "exclude_patterns": [], "exclude_paths": []}), \
+                     patch.object(vac, "get_running_processes", return_value=set()), \
+                     patch("_SMART_VAC_CLEANER.argparse.ArgumentParser.parse_args") as mock_parse:
+                    mock_parse.return_value = MagicMock(
+                        dry_run=True, delete=True, portable=False, system=False,
+                        custom=False, all=True, cli=True, status=False,
+                        analyze_caches=False, hidden=False, sys_targets="", exclude="",
+                        install_task=False, time="09:00")
+                    vac.main()
+            finally:
+                logger = logging.getLogger("vac_cleaner")
+                for h in logger.handlers[:]:
+                    try:
+                        h.close()
+                    except Exception:  # noqa: BLE001, S110 - log-handler close is best effort
+                        pass
+            self.assertTrue((portable / "_CENT" / "User Data" / "Default" / "Cache" / "data_0").exists())
+        self._tripwire(body)
+
+    def test_byte_identical_snapshot_across_cleaners(self):
+        """T-090: before/after trees are byte-identical after every dry-run path."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            portable = root / "portable"
+            (portable / "_CENT" / "User Data" / "Default" / "Cache").mkdir(parents=True)
+            (portable / "_CENT" / "User Data" / "Default" / "Cache" / "data_0").write_bytes(b"x" * 25)
+            (portable / "_CENT" / "User Data" / "Default" / "Login Data (2)").write_text("secrets")
+            appdata = root / "appdata"
+            (appdata / "Cache" / "deep").mkdir(parents=True)
+            (appdata / "Cache" / "deep" / "f.bin").write_bytes(b"y" * 40)
+            custom = root / "custom"
+            (custom / "logs").mkdir(parents=True)
+            (custom / "logs" / "x.log").write_text("log")
+
+            before = snapshot_tree(root)
+
+            with patch.object(vac, "get_running_processes", return_value=set()):
+                # _del_file
+                f = appdata / "Cache" / "deep" / "f.bin"
+                c = vac.CleanerEngine(True, vac.Logger(log_file=None, dry_run=True),
+                                      vac.SafetyGuard(root, is_system_root=True), root)
+                c._del_file(f, "f")
+                # _del_dir
+                c2 = vac.CleanerEngine(True, vac.Logger(log_file=None, dry_run=True),
+                                       vac.SafetyGuard(root, is_system_root=True), root)
+                c2._del_dir(appdata / "Cache" / "deep", "deep")
+                # _del_dir_contents
+                c3 = vac.CleanerEngine(True, vac.Logger(log_file=None, dry_run=True),
+                                       vac.SafetyGuard(root, is_system_root=True), root)
+                c3._del_dir_contents(custom / "logs", "logs")
+                # PortableCleaner
+                vac.PortableCleaner(True, vac.Logger(log_file=None, dry_run=True),
+                                    vac.SafetyGuard(portable, is_system_root=True), portable).run_all()
+                # CustomCleaner
+                vac.CustomCleaner(True, vac.Logger(log_file=None, dry_run=True),
+                                  [{"path": str(custom), "pattern": "*.log"}]).run_all()
+                # SystemCleaner with a patched appdata target
+                targets = {k: False for k in vac.SYSTEM_TARGET_DEFAULTS}
+                targets["FreeFileSync Logs"] = True
+                with patch.object(vac, "USER_APPDATA_TARGETS", [(appdata / "Cache", "FreeFileSync Logs", "freefilesync")]):
+                    vac.SystemCleaner(True, vac.Logger(log_file=None, dry_run=True), targets=targets).run_all()
+
+            after = snapshot_tree(root)
+            self.assertEqual(before, after)
+
+
 class TestSafetyInvariants(unittest.TestCase):
-    """Hardening regressions: P0-1/3/4, P1-9/11/12/13."""
+    """Hardening regressions: P0-1/3/4, P1-9/11/12/13, T-090/091."""
+
+    def test_deep_junk_sweep_installs_active_guard(self):
+        """T-091: Deep C must switch the ACTIVE guard to C:\\ so candidates are
+        not rejected against a stale AppData target root."""
+        tmp = tempfile.TemporaryDirectory()
+        try:
+            root = Path(tmp.name)
+            loc = root / "LocalAppData"
+            (loc / "GitHub CLI").mkdir(parents=True)
+            cleaner = vac.SystemCleaner(False, vac.Logger(log_file=None, dry_run=False))
+            prior = root / "NarrowStaleApp"
+            prior.mkdir()
+            cleaner.guard = vac.SafetyGuard(prior, is_system_root=True)  # stale guard
+            with patch.dict(os.environ, {"LOCALAPPDATA": str(loc), "APPDATA": str(root / "Roaming")}):
+                cleaner._deep_junk_sweep()
+            # The sweep must install C:\ as the ACTIVE guard (not keep a local guard).
+            self.assertEqual(cleaner.guard.base_root, Path("C:\\").resolve())
+            # A candidate under C:\ is now valid under the active guard: it must
+            # NOT be rejected as "Outside TARGET ROOT" the way the stale narrow
+            # guard rejected Yandex/GitHub-CLI candidates in the runtime log.
+            candidate = Path(os.environ.get("windir", r"C:\Windows")) / "Temp" / "x.tmp"
+            ok, reason = cleaner.guard.is_safe(candidate)
+            self.assertTrue(ok, reason)
+            # Regression against the runtime failure mode: a C:\-rooted candidate
+            # that sits outside the STALE guard's root must not be blocked.
+            self.assertNotIn("Outside TARGET ROOT", reason)
+        finally:
+            tmp.cleanup()
+
+    def test_deep_junk_sweep_guard_respects_exclusions(self):
+        """T-091: the installed C:\\ guard keeps the engine exclusions."""
+        cleaner = vac.SystemCleaner(True, vac.Logger(log_file=None, dry_run=True),
+                                    exclude_patterns=["*.secret"])
+        cleaner._deep_junk_sweep()
+        self.assertEqual(cleaner.guard.base_root, Path("C:\\").resolve())
+        self.assertIn("*.secret", cleaner.guard.exclude_patterns)
+
+    def test_deep_junk_no_generic_bak_deletion(self):
+        """T-099: *.bak rollback artifacts must NOT be auto-deleted."""
+        tmp = tempfile.TemporaryDirectory()
+        try:
+            root = Path(tmp.name)
+            loc = root / "LocalAppData"
+            (loc / "Yandex" / "Yandex.Disk.2").mkdir(parents=True)
+            bak = loc / "Yandex" / "Yandex.Disk.2" / "settings.bak"
+            bak.write_text("rollback")
+            (loc / "AnthropicClaude").mkdir()
+            asar = loc / "AnthropicClaude" / "app.asar.bak"
+            asar.write_text("rollback")
+            roaming = root / "Roaming"
+            (roaming / "FastPrompter").mkdir(parents=True)
+            fbak = roaming / "FastPrompter" / "conf.bak"
+            fbak.write_text("rollback")
+            cleaner = vac.SystemCleaner(False, vac.Logger(log_file=None, dry_run=False))
+            with patch.dict(os.environ, {"LOCALAPPDATA": str(loc), "APPDATA": str(roaming)}):
+                cleaner._deep_junk_sweep()
+            self.assertTrue(bak.exists(), "Yandex.Disk *.bak must survive (T-099)")
+            self.assertTrue(asar.exists(), "Claude app.asar.bak must survive (T-099)")
+            self.assertTrue(fbak.exists(), "FastPrompter *.bak must survive (T-099)")
+        finally:
+            tmp.cleanup()
 
     def _engine(self, root, exclusions=()):
         log = vac.Logger(log_file=None, dry_run=False)
@@ -877,7 +1248,8 @@ class TestSafetyInvariants(unittest.TestCase):
             (ffs / "LastRun.ffs_real").write_text("state")
             targets = {k: False for k in vac.SYSTEM_TARGET_DEFAULTS}
             targets["FreeFileSync Logs"] = True
-            with patch.object(vac, "USER_APPDATA_TARGETS", [(ffs / "Logs", "FreeFileSync Logs", None)]):
+            with patch.object(vac, "USER_APPDATA_TARGETS", [(ffs / "Logs", "FreeFileSync Logs", "freefilesync")]), \
+                 patch.object(vac, "get_running_processes", return_value=set()):
                 cleaner = vac.SystemCleaner(False, vac.Logger(log_file=None, dry_run=False), targets=targets)
                 cleaner.run_all()
             self.assertFalse((ffs / "Logs" / "run_2026.log").exists())
@@ -1014,11 +1386,34 @@ class TestSafetyInvariants(unittest.TestCase):
             log = vac.Logger(log_file=None, dry_run=False)
             cancel = threading.Event()
             cancel.set()
-            cleaner = vac.CleanerEngine(False, log, vac.SafetyGuard(root), root, cancel_event=cancel)
+            cleaner = vac.CleanerEngine(False, log, vac.SafetyGuard(root, is_system_root=True), root, cancel_event=cancel)
             with self.assertRaises(vac.CancelJobException):
                 cleaner._del_dir_contents(target, "app")
             self.assertTrue((target / "a.bin").exists())
             self.assertEqual(log.n_deleted, 0)
+
+    def test_cancel_after_plan_before_apply_deletes_nothing(self):
+        """T-094/D: cancellation between discovery and mutation must not
+        leave a partially-deleted tree or bogus counters."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app"
+            (target / "deep").mkdir(parents=True)
+            for i in range(3):
+                (target / f"f{i}.bin").write_bytes(b"x" * 10)
+            (target / "deep" / "g.bin").write_bytes(b"y" * 20)
+            log = vac.Logger(log_file=None, dry_run=False)
+            cancel = threading.Event()
+            cleaner = vac.CleanerEngine(False, log, vac.SafetyGuard(root, is_system_root=True), root, cancel_event=cancel)
+            plan = cleaner._plan_tree(target, "app")  # discovery done, cancel not yet set
+            self.assertEqual(plan["bytes"], 50)
+            cancel.set()  # cancel between plan and apply
+            with self.assertRaises(vac.CancelJobException):
+                cleaner._del_dir(target, "app")
+            self.assertTrue((target / "f0.bin").exists())
+            self.assertTrue((target / "deep" / "g.bin").exists())
+            self.assertEqual(log.n_deleted, 0)
+            self.assertEqual(log.bytes_freed, 0)
 
 
 class TestAllowlistShrink(unittest.TestCase):
@@ -1127,6 +1522,205 @@ class TestCLISemantics(unittest.TestCase):
             self.assertIn(flag, cmd)
         # list2cmdline quoting round-trips back to the argv
         self.assertEqual(vac.subprocess.list2cmdline(argv), cmd)
+
+
+class TestGuiThreadBoundary(unittest.TestCase):
+    """T-093/094: worker/timer/tray threads never call Tk; shutdown waits for the worker."""
+
+    class _Stub:
+        def configure(self, *a, **k):
+            return None
+
+        def insert(self, *a, **k):
+            return None
+
+        def see(self, *a, **k):
+            return None
+
+        def set(self, *a, **k):
+            return None
+
+    def _fake_app(self, after_mode="record"):
+        app = object.__new__(vac.App)
+        app.log_queue = queue.Queue()
+        app.cancel_event = threading.Event()
+        app.config = {"exclude_patterns": [], "exclude_paths": [], "auto_clean_interval_hours": 0}
+        app.progress = vac.ProgressTracker()
+        app._clean_in_progress = False
+        app._close_pending = False
+        app._job_done_event = threading.Event()
+        app._worker_thread = None
+        app._clean_timer = None
+        app.text_log = self._Stub()
+        app.dash_stats = self._Stub()
+        app.dash_bar = self._Stub()
+        app.dash_cat_container = self._Stub()
+        app.dash_cat_widgets = {}
+        app.T = {"cancelled": "cancelled"}
+        if after_mode == "boom":
+            def boom(*a, **k):
+                raise AssertionError("worker thread called Tk after()")
+            app.after = boom
+        else:
+            app._after_calls = []
+            def record(delay, fn):
+                app._after_calls.append(fn)
+                return len(app._after_calls)
+            app.after = record
+        app.quit = lambda: None
+        app.destroy = lambda: None
+        return app
+
+    def test_worker_log_never_calls_after(self):
+        app = self._fake_app(after_mode="boom")
+        app._log("hello")  # must not touch Tk
+        self.assertEqual(app.log_queue.get_nowait(), "hello")
+
+    def test_run_job_worker_signals_event_only(self):
+        app = self._fake_app(after_mode="boom")
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch.object(vac, "BASE_DIR", Path(tmp)), \
+             patch.object(vac, "run_cleaning_job", side_effect=vac.CancelJobException("stop")):
+            try:
+                app._run_job()
+            finally:
+                logger = logging.getLogger("vac_cleaner")
+                for h in logger.handlers[:]:
+                    try:
+                        h.close()
+                    except Exception:  # noqa: BLE001, S110 - best effort
+                        pass
+        self.assertTrue(app._job_done_event.is_set())
+        self.assertEqual(app.log_queue.get_nowait(), "cancelled")
+
+    def test_auto_clean_timer_only_enqueues(self):
+        app = self._fake_app(after_mode="boom")
+        app._clean_in_progress = False
+        app._auto_clean_trigger()
+        self.assertEqual(app.log_queue.get_nowait(), app._AUTO_CLEAN_MARKER)
+
+    def test_close_pending_waits_for_worker(self):
+        """T-094: destroy must not fire while a worker is still alive."""
+        app = self._fake_app(after_mode="record")
+        entered = threading.Event()
+        release = threading.Event()
+
+        def slow_worker():
+            entered.set()
+            release.wait(timeout=10)
+
+        app._worker_thread = threading.Thread(target=slow_worker, daemon=True)
+        app._worker_thread.start()
+        entered.wait(timeout=5)
+        app._close_pending = True
+        app._poll_main()  # worker still alive -> no destroy, poller re-scheduled
+        self.assertTrue(app._after_calls, "poller must reschedule while worker alive")
+        app._after_calls.clear()
+        release.set()
+        app._worker_thread.join(timeout=10)
+        app._poll_main()  # worker dead -> destroy fires, no reschedule
+        self.assertFalse(app._after_calls, "poller must stop after destroy path")
+
+    def test_full_exit_impl_refuses_live_worker(self):
+        app = self._fake_app()
+        entered = threading.Event()
+        release = threading.Event()
+
+        def slow_worker():
+            entered.set()
+            release.wait(timeout=10)
+
+        app._worker_thread = threading.Thread(target=slow_worker, daemon=True)
+        app._worker_thread.start()
+        entered.wait(timeout=5)
+        app._full_exit_impl()  # must refuse while alive
+        self.assertTrue(app._worker_thread.is_alive())
+        release.set()
+        app._worker_thread.join(timeout=10)
+        app._full_exit_impl()
+        self.assertFalse(app._worker_thread.is_alive())
+
+
+class TestWindowsUpdateTransaction(unittest.TestCase):
+    """T-095: wuauserv stop/clean/restore is transaction-safe."""
+
+    def _mock_run(self, calls, stop_rc=0):
+        def fake_run(argv, *a, **k):
+            calls.append(list(argv[:2]))
+            if argv[0] == "net" and argv[1] == "stop":
+                return MagicMock(returncode=stop_rc)
+            if argv[0] == "net" and argv[1] == "start":
+                return MagicMock(returncode=0)
+            raise AssertionError(f"unexpected subprocess: {argv}")
+        return fake_run
+
+    def test_stop_failure_skips_deletion(self):
+        c = vac.SystemCleaner(False, vac.Logger(log_file=None, dry_run=False))
+        calls = []
+        with patch.object(vac.subprocess, "run", side_effect=self._mock_run(calls, stop_rc=5)), \
+             patch.object(c, "_service_state", return_value="RUNNING"), \
+             patch.object(c, "_del_dir_contents", side_effect=AssertionError("must not delete")):
+            freed = c._clean_windows_update_cache(Path("C:\\x"))
+        self.assertEqual(freed, 0)
+
+    def test_stop_unverified_skips_deletion(self):
+        """Service still not stopped after 'net stop' => deletion skipped."""
+        c = vac.SystemCleaner(False, vac.Logger(log_file=None, dry_run=False))
+        calls = []
+        with patch.object(vac.subprocess, "run", side_effect=self._mock_run(calls)), \
+             patch.object(c, "_service_state", side_effect=["RUNNING", "RUNNING"]), \
+             patch.object(c, "_del_dir_contents", side_effect=AssertionError("must not delete")):
+            freed = c._clean_windows_update_cache(Path("C:\\x"))
+        self.assertEqual(freed, 0)
+
+    def test_cancellation_restores_service(self):
+        c = vac.SystemCleaner(False, vac.Logger(log_file=None, dry_run=False))
+        calls = []
+        with patch.object(vac.subprocess, "run", side_effect=self._mock_run(calls)), \
+             patch.object(c, "_service_state", side_effect=["RUNNING", "STOPPED"]), \
+             patch.object(c, "_del_dir_contents", side_effect=vac.CancelJobException("x")), \
+             self.assertRaises(vac.CancelJobException):
+            c._clean_windows_update_cache(Path("C:\\x"))
+        self.assertEqual([a[1] for a in calls], ["stop", "start"])
+
+    def test_deletion_exception_restores_service(self):
+        c = vac.SystemCleaner(False, vac.Logger(log_file=None, dry_run=False))
+        calls = []
+        with patch.object(vac.subprocess, "run", side_effect=self._mock_run(calls)), \
+             patch.object(c, "_service_state", side_effect=["RUNNING", "STOPPED"]), \
+             patch.object(c, "_del_dir_contents", side_effect=OSError("boom")), \
+             self.assertRaises(OSError):
+            c._clean_windows_update_cache(Path("C:\\x"))
+        self.assertEqual([a[1] for a in calls], ["stop", "start"])
+
+    def test_originally_stopped_never_started(self):
+        c = vac.SystemCleaner(False, vac.Logger(log_file=None, dry_run=False))
+        calls = []
+        with patch.object(vac.subprocess, "run", side_effect=self._mock_run(calls)), \
+             patch.object(c, "_service_state", return_value="STOPPED"), \
+             patch.object(c, "_del_dir_contents", return_value=10):
+            freed = c._clean_windows_update_cache(Path("C:\\x"))
+        self.assertEqual(freed, 10)
+        self.assertEqual(calls, [])
+
+    def test_unknown_state_skips(self):
+        c = vac.SystemCleaner(False, vac.Logger(log_file=None, dry_run=False))
+        calls = []
+        with patch.object(vac.subprocess, "run", side_effect=self._mock_run(calls)), \
+             patch.object(c, "_service_state", return_value=None), \
+             patch.object(c, "_del_dir_contents", side_effect=AssertionError("must not delete")):
+            freed = c._clean_windows_update_cache(Path("C:\\x"))
+        self.assertEqual(freed, 0)
+        self.assertEqual(calls, [])
+
+    def test_dry_run_zero_service_mutation(self):
+        c = vac.SystemCleaner(True, vac.Logger(log_file=None, dry_run=True))
+        targets = {k: False for k in vac.SYSTEM_TARGET_DEFAULTS}
+        targets["Windows Update Cache"] = True
+        c.targets = targets
+        with patch.object(vac.subprocess, "run", side_effect=AssertionError("dry-run service mutation")), \
+             patch.object(vac, "get_running_processes", return_value=set()):
+            c.run_all()
 
 
 class TestI18nSymmetry(unittest.TestCase):
