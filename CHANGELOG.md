@@ -1,6 +1,6 @@
 # Changelog
 
-## Hardening (unreleased)
+## v2.5.0
 - **Safety hardening (data-loss fixes)**
   - **Dry-run is physically read-only**: deletion split into a pure read-only planning phase and an apply phase that runs only in real-delete mode. A dry-run performs no unlink/chmod/rmdir, no DNS flush, no service stop/start, no recycle-bin call (mutation-tripwire + byte-identical snapshot tests).
   - FreeFileSync cache target retargeted to the explicit `Logs` child; `GlobalSettings.xml` / `LastRun.ffs_*` protected. Numbered copies are explicit junk-only; `Cookies (2)` / `Login Data (3)` / `History (3)` survive.
