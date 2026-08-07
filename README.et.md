@@ -164,3 +164,4 @@ Töötab võrguühenduseta, puudutab ainult ajutisi katalooge.
 - Tegumihalduri ülesande paigaldamine nõuab administraatori õigusi (`/rl HIGHEST`).
 - Kaasaskantavad juured mittesüsteemsetel ketastel puhastatakse ka ilma adminita (VAC-skeem).
 - Projekt pole seotud ühegi müüjaga; kõik teed on tuntud vahemälu/logikataloogid, mida rakendused taastavad.
+<!-- source-digest: README.md sha256:bb86d5bfbdce58a9 -->

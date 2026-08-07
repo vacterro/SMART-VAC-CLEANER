@@ -1,6 +1,6 @@
 # Smart VAC Cleaner
 
-[English](README.md) · [Русский](README.ru.md) · [Eesti](README.et.md)
+[English](README.md) · [Русский](README.ru.md) · [Eesti](README.et.md) · [Дед](README.ded.md)
 
 ![Smart VAC Cleaner GUI](assets/screenshot.png)
 

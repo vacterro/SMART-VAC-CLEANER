@@ -1,5 +1,10 @@
 # Changelog
 
+## v2.4.16
+- i18n: Added angry-grandpa (`Дед`) voice UI localization (`strings/ded.json`) and translated `README.ded.md`.
+- Updated language switcher across all READMEs (`en`, `ru`, `et`, `ded`) and appended source-digest to locales.
+- Version bump to 2.4.16 (VERSION, pyproject, CHANGELOG).
+
 ## v2.4.15
 - New **Run in bg** button (sidebar, under Install Auto-Clean Task): spawns a detached silent background full-clean (`pythonw`/exe, hidden console, no GUI) and returns — double-click guarded via `Popen.poll()`. Reuses the same argv as the scheduled task.
 - i18n: 3 new string keys (en/ru/et): `run_bg`, `run_bg_started`, `run_bg_running`.
