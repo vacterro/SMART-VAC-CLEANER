@@ -1,5 +1,8 @@
 # Changelog
 
+## v2.5.1
+- test: `test_old_opera_versions_keep_latest` made environment-independent — it no longer depends on whether Opera happens to be running on the host (the safety gate correctly skips when it is); regression is now deterministic. 159 tests green, ruff clean.
+
 ## v2.5.0
 - **Safety hardening (data-loss fixes)**
   - **Dry-run is physically read-only**: deletion split into a pure read-only planning phase and an apply phase that runs only in real-delete mode. A dry-run performs no unlink/chmod/rmdir, no DNS flush, no service stop/start, no recycle-bin call (mutation-tripwire + byte-identical snapshot tests).
