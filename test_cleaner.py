@@ -6,6 +6,7 @@ import os
 import re
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -68,7 +69,7 @@ class TestConfigPersistence(unittest.TestCase):
         self.assertTrue(self.tmp_config.exists())
 
     def test_save_and_load_roundtrip(self):
-        data = {"custom_rules": [{"path": "C:\\Users\\nobody\\AppData\\Local\\Temp\\app", "pattern": "*.log"}]}
+        data = {"custom_rules": [{"path": "D:\\Apps\\TestApp", "pattern": "*.log"}]}
         vac.save_config(data)
         loaded = vac.load_config()
         self.assertEqual(loaded["custom_rules"], data["custom_rules"])
@@ -121,22 +122,44 @@ class TestConfigPersistence(unittest.TestCase):
 class TestUserAppdataTargets(unittest.TestCase):
 
     def test_new_safe_targets_present(self):
-        names = [d for _, d in vac.USER_APPDATA_TARGETS]
+        names = [d for _, d, _ in vac.USER_APPDATA_TARGETS]
         for expected in ["Brave Cache", "Brave Code Cache", "Brave GPU Cache",
-                         "Chrome Code Cache", "Edge Code Cache", "CEF Cache",
-                         "Calibre Cache", "fontconfig Cache", "qBittorrent Logs",
-                         "Claude CLI Cache", "Resolve Welcome Cache"]:
+                         "Chrome Code Cache", "Edge Code Cache", "Calibre Cache",
+                         "fontconfig Cache", "qBittorrent Logs", "Claude CLI Cache",
+                         "FreeFileSync Logs"]:
             self.assertIn(expected, names)
 
-    def test_targets_are_path_desc_pairs(self):
-        for p, d in vac.USER_APPDATA_TARGETS:
+    def test_targets_are_path_desc_owner_triples(self):
+        for p, d, owner in vac.USER_APPDATA_TARGETS:
             self.assertIsInstance(p, Path)
             self.assertIsInstance(d, str)
             self.assertTrue(d)
+            if owner is not None:
+                self.assertIn(owner, vac.APP_PROCESSES)
 
     def test_targets_no_duplicate_paths(self):
-        paths = [str(p.resolve()) for p, _ in vac.USER_APPDATA_TARGETS]
+        paths = [str(p.resolve()) for p, _, _ in vac.USER_APPDATA_TARGETS]
         self.assertEqual(len(paths), len(set(paths)))
+
+    def test_freefilesync_target_is_explicit_logs_child(self):
+        """P0-1: never point a cache target at an app/config root."""
+        for p, d, _ in vac.USER_APPDATA_TARGETS:
+            if d == "FreeFileSync Logs":
+                self.assertTrue(str(p).lower().endswith(os.path.join("freefilesync", "logs")) or
+                                str(p).lower().endswith(os.path.join("freefilesync", "logs").replace("\\", "/")))
+                return
+        self.fail("FreeFileSync Logs target missing")
+
+    def test_broad_app_roots_quarantined(self):
+        """P0-6: whole app/profile/config roots must not be deletion targets."""
+        raw = [str(p).lower() for p, _, _ in vac.USER_APPDATA_TARGETS]
+        for banned in ["cef", "davinci resolve welcome", "perdriverversion"]:
+            for p in raw:
+                self.assertNotIn(banned, p.split(os.sep)[-2:], banned)
+        # Razer Service Worker whole-root target removed
+        for p, d, _ in vac.USER_APPDATA_TARGETS:
+            if d.startswith("Razer"):
+                self.assertFalse(p.name.lower() == "service worker", "whole SW root target")
 
 
 class TestSafetyGuard(unittest.TestCase):
@@ -192,18 +215,42 @@ class TestGetRunningProcesses(unittest.TestCase):
             stdout='"chrome.exe","1234","Console"\r\n"firefox.exe","5678","Console"\r\n',
             returncode=0)
         procs = vac.get_running_processes()
-        self.assertIn("chrome.exe", procs)
-        self.assertIn("firefox.exe", procs)
+        self.assertEqual(procs, {"chrome.exe", "firefox.exe"})
 
     @patch("_SMART_VAC_CLEANER.subprocess.run")
-    def test_failure_returns_empty(self, mock_run):
+    def test_parses_quoted_csv_image_names(self, mock_run):
+        """tasklist csv rows may carry quotes; csv.reader must handle them (P1-8)."""
+        mock_run.return_value = MagicMock(
+            stdout='"chrome.exe, x64","1234","Console"\r\n',
+            returncode=0)
+        procs = vac.get_running_processes()
+        self.assertEqual(procs, {"chrome.exe, x64"})
+
+    @patch("_SMART_VAC_CLEANER.subprocess.run")
+    def test_failure_returns_none_fail_closed(self, mock_run):
+        """Exception => UNKNOWN (None), never an empty 'nothing runs' set (P1-8)."""
         mock_run.side_effect = OSError("fail")
-        self.assertEqual(vac.get_running_processes(), set())
+        self.assertIsNone(vac.get_running_processes())
+
+    @patch("_SMART_VAC_CLEANER.subprocess.run")
+    def test_nonzero_exit_returns_none(self, mock_run):
+        """Nonzero tasklist exit => UNKNOWN (None), never 'nothing runs'."""
+        mock_run.return_value = MagicMock(stdout="", returncode=1)
+        self.assertIsNone(vac.get_running_processes())
 
     @patch("_SMART_VAC_CLEANER.subprocess.run")
     def test_empty_output(self, mock_run):
         mock_run.return_value = MagicMock(stdout="", returncode=0)
         self.assertEqual(vac.get_running_processes(), set())
+
+    def test_is_app_running_unknown_blocks(self):
+        """Real process group + UNKNOWN snapshot => treated as running (fail closed)."""
+        self.assertTrue(vac.is_app_running("brave", None))
+        self.assertTrue(vac.is_app_running("chrome", None))
+
+    def test_is_app_running_general_never_blocks(self):
+        self.assertFalse(vac.is_app_running("general", None))
+        self.assertFalse(vac.is_app_running("general", {"chrome.exe"}))
 
 
 class TestGetSize(unittest.TestCase):
@@ -329,7 +376,13 @@ class TestExclusions(unittest.TestCase):
 
 
 class TestBlacklist(unittest.TestCase):
-    """Tests for path blacklist protection."""
+    """Tests for path blacklist protection (P1-10: roots + descendants)."""
+
+    @staticmethod
+    def _non_c_drive_path(*parts):
+        """An absolute path on the cwd's drive (non-C: on this machine), away from the repo."""
+        drive = os.path.splitdrive(os.getcwd())[0] or "D:"
+        return Path(drive + os.sep, ".__vac_safety_test__", *parts)
 
     def test_windir_blocked(self):
         self.assertTrue(vac.is_path_blacklisted(Path(os.environ.get("windir", r"C:\Windows"))))
@@ -337,12 +390,29 @@ class TestBlacklist(unittest.TestCase):
     def test_windir_children_blocked(self):
         self.assertTrue(vac.is_path_blacklisted(Path(os.environ.get("windir", r"C:\Windows")) / "Temp"))
 
-    def test_script_dir_blocked(self):
+    def test_program_files_blocked(self):
+        self.assertTrue(vac.is_path_blacklisted(Path(os.environ.get("ProgramFiles", r"C:\Program Files"))))
+
+    def test_program_files_children_blocked(self):
+        """P1-10: descendants of Program Files must be rejected."""
+        self.assertTrue(vac.is_path_blacklisted(
+            Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "Google" / "Chrome" / "Application"))
+
+    def test_program_files_x86_children_blocked(self):
+        self.assertTrue(vac.is_path_blacklisted(
+            Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")) / "Microsoft" / "Edge"))
+
+    def test_userprofile_children_blocked(self):
+        """Docs say USERPROFILE is rejected; descendants follow (P1-10)."""
+        self.assertTrue(vac.is_path_blacklisted(
+            Path(os.environ.get("USERPROFILE", r"C:\Users")) / "AppData" / "Local"))
+
+    def test_cleaner_dir_blocked(self):
         self.assertTrue(vac.is_path_blacklisted(vac.SCRIPT_PATH.parent))
+        self.assertTrue(vac.is_path_blacklisted(vac.BASE_DIR / "sub" / "child"))
 
     def test_regular_dir_allowed(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            self.assertFalse(vac.is_path_blacklisted(Path(tmp)))
+        self.assertFalse(vac.is_path_blacklisted(self._non_c_drive_path("cache")))
 
     def test_custom_rule_blacklisted_skipped(self):
         """CustomCleaner skips blacklisted rules without touching them."""
@@ -366,7 +436,24 @@ class TestPortableSweep(unittest.TestCase):
         root.mkdir(parents=True)
         return root
 
-    def test_numbered_copies(self):
+    def test_numbered_copies_junk_base_only(self):
+        """P0-2: numbered cleanup is explicit junk-only; unknown bases are kept."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._deep_root(tmp)
+            for name in ["cache", "cache (1)", "cache (2)", "cache (3)"]:
+                p = root / name
+                p.mkdir()
+                (p / "x.txt").write_text("x")
+            cleaner, log = self._cleaner(root)
+            cleaner.sweep_numbered_copies(root, "app")
+            self.assertTrue((root / "cache").exists())
+            self.assertTrue((root / "cache (1)").exists())
+            self.assertFalse((root / "cache (2)").exists())
+            self.assertFalse((root / "cache (3)").exists())
+            self.assertEqual(log.n_deleted, 2)
+
+    def test_numbered_copies_non_junk_kept(self):
+        """P0-2: 'app (2)' (not proven junk) survives the sweep."""
         with tempfile.TemporaryDirectory() as tmp:
             root = self._deep_root(tmp)
             for name in ["app", "app (1)", "app (2)", "app (3)"]:
@@ -375,16 +462,40 @@ class TestPortableSweep(unittest.TestCase):
                 (p / "x.txt").write_text("x")
             cleaner, log = self._cleaner(root)
             cleaner.sweep_numbered_copies(root, "app")
-            self.assertTrue((root / "app").exists())
-            self.assertTrue((root / "app (1)").exists())
-            self.assertFalse((root / "app (2)").exists())
-            self.assertFalse((root / "app (3)").exists())
-            self.assertEqual(log.n_deleted, 2)
+            self.assertTrue((root / "app (2)").exists())
+            self.assertTrue((root / "app (3)").exists())
+            self.assertEqual(log.n_deleted, 0)
+
+    def test_numbered_copies_protected_profile_names_survive(self):
+        """P0-2: protected user data with a numbered suffix survives the sweep."""
+        protected = ["Cookies (2)", "Network Persistent State (2)", "Bookmarks (2)",
+                     "History (2)", "History (3)", "Login Data (2)", "Preferences (8)",
+                     "Affiliation Database (2)"]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._deep_root(tmp)
+            for name in protected:
+                (root / name).write_text("secrets")
+            cleaner, log = self._cleaner(root)
+            cleaner.sweep_numbered_copies(root, "app")
+            for name in protected:
+                self.assertTrue((root / name).exists(), name)
+            self.assertEqual(log.n_deleted, 0)
+
+    def test_name_variants_protect_numbered_names(self):
+        """P0-2: every runtime-lost protected name must map into NEVER_DELETE_NAMES."""
+        for name in ["cookies (2)", "network persistent state (2)", "bookmarks (2)",
+                     "history (2)", "history (3)", "login data (2)", "preferences (8)",
+                     "affiliation database (2)", "affiliation database-journal",
+                     "trusted_vault.pb", "passkey_enclave_state",
+                     "global settings.xml", "lastrun.ffs_real",
+                     "cookies-journal", "session storage", "databases"]:
+            variants = vac._name_variants(name.lower())
+            self.assertTrue(any(v in vac.NEVER_DELETE_NAMES for v in variants), name)
 
     def test_numbered_copies_skipped_when_running(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = self._deep_root(tmp)
-            p = root / "app (2)"
+            p = root / "cache (2)"
             p.mkdir()
             (p / "x.txt").write_text("x")
             cleaner, log = self._cleaner(root)
@@ -676,6 +787,348 @@ class TestI18n(unittest.TestCase):
         self.assertEqual(s["clean"], "Clean")
 
 
+class TestSafetyInvariants(unittest.TestCase):
+    """Hardening regressions: P0-1/3/4, P1-9/11/12/13."""
+
+    def _engine(self, root, exclusions=()):
+        log = vac.Logger(log_file=None, dry_run=False)
+        cleaner = vac.CleanerEngine(False, log, vac.SafetyGuard(root, is_system_root=True), root,
+                                    vac.DEFAULT_THREADS, None,
+                                    exclude_patterns=[exclusions[0]] if exclusions else None,
+                                    exclude_paths=[exclusions[1]] if len(exclusions) > 1 else None)
+        return cleaner, log
+
+    def test_exclusions_inherited_by_engine_guard(self):
+        """P0-3: engine exclusions reach the guard the engine actually uses."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            pattern = "*.secret"
+            cleaner, _ = self._engine(root, (pattern,))
+            self.assertIn(pattern, cleaner.guard.exclude_patterns)
+
+    def test_system_cleaner_guards_carry_exclusions(self):
+        """P0-3: SystemCleaner's per-target guards inherit exclusions."""
+        with tempfile.TemporaryDirectory() as tmp:
+            excl_path = Path(tmp) / "keep"
+            excl_path.mkdir()
+            cleaner = vac.SystemCleaner(True, vac.Logger(log_file=None, dry_run=True),
+                                        exclude_patterns=["*.tmp"], exclude_paths=[str(excl_path)])
+            cleaner._set_guard(Path(tmp))
+            ok, _ = cleaner.guard.is_safe(excl_path / "x.bin")
+            self.assertFalse(ok)
+            ok2, _ = cleaner.guard.is_safe(Path(tmp) / "other" / "f.tmp")
+            self.assertFalse(ok2)
+
+    def test_custom_cleaner_guards_carry_exclusions(self):
+        """P0-3: CustomCleaner per-rule guards inherit exclusions."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            excl = root / "keep"
+            excl.mkdir()
+            rules = [{"path": str(root), "pattern": "*"}]
+            cleaner = vac.CustomCleaner(True, vac.Logger(log_file=None, dry_run=True), rules,
+                                        exclude_paths=[str(excl)])
+            cleaner.run_all()
+            self.assertTrue(excl.exists())
+            self.assertIn(str(excl.resolve()), [str(p) for p in cleaner.guard.exclude_paths])
+
+    def test_deep_junk_guard_carries_exclusions(self):
+        """P0-3: _deep_junk_sweep guard inherits exclusions."""
+        cleaner = vac.SystemCleaner(True, vac.Logger(log_file=None, dry_run=True),
+                                    exclude_patterns=["*.secret"])
+        guard = cleaner.make_guard(Path("C:\\"))
+        self.assertIn("*.secret", guard.exclude_patterns)
+
+    def test_excluded_descendant_two_levels_survives(self):
+        """P0-4: excluded subtree 2+ levels deep survives a dir delete."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app"
+            keep = target / "sub" / "inner" / "keep"
+            keep.mkdir(parents=True)
+            (target / "junk.txt").write_text("x")
+            cleaner, _ = self._engine(root, exclusions=("", str(keep)))
+            freed = cleaner._del_dir(target, "app")
+            self.assertTrue(keep.exists())
+            self.assertTrue((target / "sub" / "inner").exists())
+            self.assertFalse((target / "junk.txt").exists())
+            self.assertGreater(freed, 0)
+
+    def test_never_delete_nested_in_deletable_dir_survives(self):
+        """P0-4: a never-delete file nested inside a deletable dir survives."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app"
+            (target / "deep" / "sub").mkdir(parents=True)
+            (target / "deep" / "sub" / "Login Data").write_text("secrets")
+            (target / "deep" / "junk.bin").write_bytes(b"x" * 100)
+            cleaner, _ = self._engine(root)
+            cleaner._del_dir(target, "app")
+            self.assertTrue((target / "deep" / "sub" / "Login Data").exists())
+            self.assertFalse((target / "deep" / "junk.bin").exists())
+
+    def test_freefilesync_regression(self):
+        """P0-1: sweeping the explicit Logs child never touches config/state files."""
+        with tempfile.TemporaryDirectory() as tmp:
+            ffs = Path(tmp)
+            (ffs / "Logs").mkdir(parents=True)
+            (ffs / "Logs" / "run_2026.log").write_text("log")
+            (ffs / "GlobalSettings.xml").write_text("cfg")
+            (ffs / "LastRun.ffs_real").write_text("state")
+            targets = {k: False for k in vac.SYSTEM_TARGET_DEFAULTS}
+            targets["FreeFileSync Logs"] = True
+            with patch.object(vac, "USER_APPDATA_TARGETS", [(ffs / "Logs", "FreeFileSync Logs", None)]):
+                cleaner = vac.SystemCleaner(False, vac.Logger(log_file=None, dry_run=False), targets=targets)
+                cleaner.run_all()
+            self.assertFalse((ffs / "Logs" / "run_2026.log").exists())
+            self.assertTrue((ffs / "GlobalSettings.xml").exists())
+            self.assertTrue((ffs / "LastRun.ffs_real").exists())
+
+    def test_owner_running_skips_target(self):
+        """P1-9: app-owned system target is skipped when the owner runs."""
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "Cache"
+            target.mkdir()
+            (target / "f.bin").write_bytes(b"x" * 10)
+            targets = {k: False for k in vac.SYSTEM_TARGET_DEFAULTS}
+            targets["Discord Cache"] = True
+            with patch.object(vac, "USER_APPDATA_TARGETS", [(target, "Discord Cache", "discord")]), \
+                 patch.object(vac, "get_running_processes", return_value={"discord.exe"}):
+                cleaner = vac.SystemCleaner(False, vac.Logger(log_file=None, dry_run=False), targets=targets)
+                cleaner.run_all()
+            self.assertTrue(target.exists())
+
+    def test_owner_unknown_skips_target(self):
+        """P1-9: UNKNOWN process state skips app-owned targets (fail closed)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "Cache"
+            target.mkdir()
+            (target / "f.bin").write_bytes(b"x" * 10)
+            targets = {k: False for k in vac.SYSTEM_TARGET_DEFAULTS}
+            targets["Discord Cache"] = True
+            with patch.object(vac, "USER_APPDATA_TARGETS", [(target, "Discord Cache", "discord")]), \
+                 patch.object(vac, "get_running_processes", return_value=None):
+                cleaner = vac.SystemCleaner(False, vac.Logger(log_file=None, dry_run=False), targets=targets)
+                cleaner.run_all()
+            self.assertTrue(target.exists())
+
+    def test_symlink_never_followed_or_deleted(self):
+        """P1-11: symlinks are refused by the guard and the delete primitives."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            outside = Path(tmp) / "outside"
+            outside.mkdir()
+            (outside / "target.txt").write_text("data")
+            link = root / "link"
+            try:
+                link.symlink_to(outside, target_is_directory=True)
+            except (OSError, NotImplementedError):
+                self.skipTest("symlinks not supported on this environment")
+            guard = vac.SafetyGuard(root)
+            ok, _ = guard.is_safe(link)
+            self.assertFalse(ok)
+            log = vac.Logger(log_file=None, dry_run=False)
+            cleaner = vac.CleanerEngine(False, log, vac.SafetyGuard(root), root)
+            self.assertEqual(cleaner._del_dir(link, "link"), 0)
+            self.assertTrue(link.exists())
+            self.assertTrue((outside / "target.txt").exists())
+
+    @unittest.skipUnless(os.name == "nt", "Windows junction only")
+    def test_junction_never_followed_or_deleted(self):
+        """P1-11: junctions/reparse points are refused like symlinks."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            outside = Path(tmp) / "outside"
+            outside.mkdir()
+            (outside / "target.txt").write_text("data")
+            junction = root / "junction"
+            rc = os.system(f'mklink /J "{junction}" "{outside}"')
+            if rc != 0:
+                self.skipTest("mklink failed")
+            guard = vac.SafetyGuard(root)
+            ok, _ = guard.is_safe(junction)
+            self.assertFalse(ok)
+            self.assertTrue(vac.is_link(junction))
+            log = vac.Logger(log_file=None, dry_run=False)
+            cleaner = vac.CleanerEngine(False, log, vac.SafetyGuard(root), root)
+            self.assertEqual(cleaner._del_dir(junction, "junction"), 0)
+            self.assertTrue(junction.exists())
+            self.assertTrue((outside / "target.txt").exists())
+
+    def test_failed_delete_not_counted(self):
+        """P1-12: a failed unlink inflates no counters and frees no bytes."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            f = root / "f.bin"
+            f.write_bytes(b"x" * 500)
+            log = vac.Logger(log_file=None, dry_run=False)
+            cleaner = vac.CleanerEngine(False, log, vac.SafetyGuard(root), root)
+            with patch.object(Path, "unlink", side_effect=PermissionError):
+                freed = cleaner._del_file(f, "f")
+            self.assertEqual(freed, 0)
+            self.assertEqual(log.n_deleted, 0)
+            self.assertEqual(log.bytes_freed, 0)
+            self.assertTrue(f.exists())
+
+    def test_del_dir_counts_only_after_delete(self):
+        """P1-12: _del_dir with a failing unlink logs skipped, counts nothing."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app"
+            target.mkdir()
+            (target / "a.bin").write_bytes(b"x" * 100)
+            log = vac.Logger(log_file=None, dry_run=False)
+            cleaner = vac.CleanerEngine(False, log, vac.SafetyGuard(root), root)
+            with patch.object(Path, "unlink", side_effect=PermissionError):
+                freed = cleaner._del_dir(target, "app")
+            self.assertEqual(freed, 0)
+            self.assertEqual(log.n_deleted, 0)
+            self.assertEqual(log.bytes_freed, 0)
+            self.assertTrue((target / "a.bin").exists())
+
+    def test_cancel_stops_later_deletions(self):
+        """P1-13: once cancelled, remaining candidates are never deleted."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app"
+            target.mkdir()
+            for i in range(5):
+                (target / f"f{i}.bin").write_bytes(b"x" * 10)
+            log = vac.Logger(log_file=None, dry_run=False)
+            cancel = threading.Event()
+            cancel.set()
+            cleaner = vac.CleanerEngine(False, log, vac.SafetyGuard(root), root, cancel_event=cancel)
+            with self.assertRaises(vac.CancelJobException):
+                cleaner._del_dir(target, "app")
+            remaining = [p for p in target.iterdir()]
+            self.assertEqual(len(remaining), 5)
+            self.assertEqual(log.n_deleted, 0)
+
+    def test_cancel_mid_dir_contents(self):
+        """P1-13: _del_dir_contents raises on cancel before destructive work."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app"
+            target.mkdir()
+            (target / "a.bin").write_bytes(b"x" * 10)
+            log = vac.Logger(log_file=None, dry_run=False)
+            cancel = threading.Event()
+            cancel.set()
+            cleaner = vac.CleanerEngine(False, log, vac.SafetyGuard(root), root, cancel_event=cancel)
+            with self.assertRaises(vac.CancelJobException):
+                cleaner._del_dir_contents(target, "app")
+            self.assertTrue((target / "a.bin").exists())
+            self.assertEqual(log.n_deleted, 0)
+
+
+class TestAllowlistShrink(unittest.TestCase):
+    """P0-5: browser allowlists must not contain account/security/session state."""
+
+    def test_sw_database_removed(self):
+        self.assertNotIn("Database", vac.CHROMIUM_SW_SUBDIRS)
+
+    def test_profile_state_files_removed(self):
+        for name in ["passkey_enclave_state", "trusted_vault.pb", "Affiliation Database",
+                     "BrowsingTopicsState", "SharedStorage", "InterestGroups",
+                     "DownloadMetadata", "PrivateAggregation"]:
+            self.assertNotIn(name, vac.CHROMIUM_PROFILE_FILES, name)
+
+    def test_userdata_state_dirs_removed(self):
+        for name in ["Safe Browsing", "PKIMetadata", "OnDeviceHeadSuggestModel",
+                     "OptimizationHints", "AutofillStates", "MEIPreload",
+                     "CertificateRevocation", "Webstore Downloads"]:
+            self.assertNotIn(name, vac.CHROMIUM_USERDATA_DIRS, name)
+
+    def test_variations_removed(self):
+        self.assertNotIn("Variations", vac.CHROMIUM_USERDATA_FILES)
+
+    def test_brave_no_p3aconfig(self):
+        src = Path(vac.__file__).read_text(encoding="utf-8")
+        self.assertNotIn("P3AConfig", src)
+
+    def test_firefox_session_state_protected_not_targeted(self):
+        """P0-5: Firefox session/state dirs are protected names, not cleanup targets."""
+        for name in ["sessionstore-backups", "security_state", "datareporting"]:
+            self.assertIn(name, vac.NEVER_DELETE_NAMES, name)
+
+
+class TestCLISemantics(unittest.TestCase):
+    """P1-7 --all semantics, P2-14 --sys-targets validation, P0-3 CLI exclusions, T-067 argv."""
+
+    def test_defaults_keep_risky_targets_off(self):
+        self.assertFalse(vac.SYSTEM_TARGET_DEFAULTS["Recycle Bin"])
+        self.assertFalse(vac.SYSTEM_TARGET_DEFAULTS["DNS Cache"])
+        self.assertFalse(vac.SYSTEM_TARGET_DEFAULTS["Windows Update Cache"])
+        self.assertTrue(vac.SYSTEM_TARGET_DEFAULTS["System Temp"])
+
+    def test_dead_targets_removed(self):
+        for name in ["Windows Prefetch", "Windows Logs", "Yarn Cache", "Battle.net Cache",
+                     "Epic Games Cache", "Steam AppCache", "Steam DepotCache", "Steam Logs"]:
+            self.assertNotIn(name, vac.SYSTEM_TARGET_DEFAULTS, name)
+
+    @patch("_SMART_VAC_CLEANER.argparse.ArgumentParser.parse_args")
+    def test_all_uses_safe_defaults(self, mock_parse):
+        """P1-7: --all must NOT flip risky targets on."""
+        mock_parse.return_value = MagicMock(
+            dry_run=True, delete=False,
+            portable=False, system=False, custom=False, all=True,
+            cli=True, status=False, analyze_caches=False, hidden=False,
+            sys_targets="", exclude="", install_task=False, time="09:00",
+        )
+        captured = {}
+        def fake_job(dry_run, run_portable, run_system, run_custom, log, max_threads, sys_targets, cancel_event=None, exclude_patterns=None, exclude_paths=None, progress=None):
+            captured["sys_targets"] = sys_targets
+        with patch.object(vac, "run_cleaning_job", side_effect=fake_job), patch.object(vac, "Logger"):
+            vac.main()
+        self.assertFalse(captured["sys_targets"]["Recycle Bin"])
+        self.assertFalse(captured["sys_targets"]["DNS Cache"])
+        self.assertFalse(captured["sys_targets"]["Windows Update Cache"])
+
+    @patch("_SMART_VAC_CLEANER.argparse.ArgumentParser.parse_args")
+    def test_unknown_sys_target_errors(self, mock_parse):
+        mock_parse.return_value = MagicMock(
+            dry_run=True, delete=False,
+            portable=False, system=False, custom=False, all=True,
+            cli=True, status=False, analyze_caches=False, hidden=False,
+            sys_targets="Nope,Recycle Bin", exclude="", install_task=False, time="09:00",
+        )
+        with patch.object(vac, "Logger"), self.assertRaises(SystemExit) as cm:
+            vac.main()
+        self.assertEqual(cm.exception.code, 2)
+
+    @patch("_SMART_VAC_CLEANER.argparse.ArgumentParser.parse_args")
+    def test_cli_merges_config_and_cli_excludes(self, mock_parse):
+        """P0-3: CLI passes config.exclude_patterns PLUS --exclude additions."""
+        mock_parse.return_value = MagicMock(
+            dry_run=True, delete=False,
+            portable=True, system=False, custom=False, all=False,
+            cli=True, status=False, analyze_caches=False, hidden=False,
+            sys_targets="", exclude="*.tmp", install_task=False, time="09:00",
+        )
+        captured = {}
+        def fake_job(dry_run, run_portable, run_system, run_custom, log, max_threads, sys_targets, cancel_event=None, exclude_patterns=None, exclude_paths=None, progress=None):
+            captured["patterns"] = exclude_patterns
+            captured["paths"] = exclude_paths
+        with patch.object(vac, "run_cleaning_job", side_effect=fake_job), \
+             patch.object(vac, "Logger"), \
+             patch.object(vac, "load_config", return_value={"portable_roots": [], "custom_rules": [],
+                                                             "exclude_patterns": ["*.db"], "exclude_paths": ["D:\\Keep"]}):
+            vac.main()
+        self.assertIn("*.tmp", captured["patterns"])
+        self.assertIn("*.db", captured["patterns"])
+        self.assertIn("D:\\Keep", captured["paths"])
+
+    def test_clean_argv_canonical(self):
+        """T-067: one canonical argv builder drives background + scheduled."""
+        argv = vac.background_clean_argv()
+        self.assertEqual(argv, vac.clean_argv())
+        cmd = vac.scheduled_task_command()
+        for flag in ("--cli", "--all", "--delete", "--hidden"):
+            self.assertIn(flag, cmd)
+        # list2cmdline quoting round-trips back to the argv
+        self.assertEqual(vac.subprocess.list2cmdline(argv), cmd)
+
+
 class TestI18nSymmetry(unittest.TestCase):
     """i18n key-set guards (no fixture patching — reads real strings dir)."""
 
@@ -687,9 +1140,9 @@ class TestI18nSymmetry(unittest.TestCase):
         self.assertEqual(dead, set())
 
     def test_locale_key_sets_match_default(self):
-        """ru/et carry exactly the DEFAULT_STRINGS key set (no drift)."""
+        """ru/et/ded carry exactly the DEFAULT_STRINGS key set (no drift)."""
         en = set(vac.DEFAULT_STRINGS)
-        for lang in ("ru", "et"):
+        for lang in ("ru", "et", "ded"):
             path = vac.STRINGS_DIR / f"{lang}.json"
             d = json.loads(path.read_text(encoding="utf-8"))
             self.assertEqual(set(d), en, lang)

@@ -23,13 +23,13 @@ Missing drives are silently skipped, never errors.
 ## Safety (defense in depth)
 
 - **Dry-run by default** — GUI "Clean" is real delete (with a confirm dialog), the CLI needs `--delete` explicitly
-- **Blacklist**: `C:\`, `C:\Windows`, `USERPROFILE`, Program Files, the script's own folder — never touched, even by custom rules
+- **Blacklist**: `C:\`, `C:\Windows`, `USERPROFILE`, Program Files, the script's own folder — a protected root and every descendant under it is never touched, even by custom rules
 - **Min path depth**: shallow paths (fewer than 5 parts) are refused
-- **Running-process check**: apps using a target are skipped (per-app process lists)
-- **Symlinks refused**, `..` traversal refused
-- **Never-delete names**: `login data`, `bookmarks`, `cookies`, `database`, etc.
-- **Exclusions**: `exclude_patterns` / `exclude_paths` in config
-- All deletes go through a `SafetyGuard` per root; errors are counted, never fatal
+- **Running-process check**: apps using a target are skipped (per-app process lists); if the process table can't be queried, app-sensitive targets are skipped too (fail closed)
+- **Symlinks / junctions / reparse points refused**, `..` traversal refused
+- **Never-delete names**: `login data`, `bookmarks`, `cookies`, `history`, `trusted_vault.pb`, and more — including numbered (`Cookies (2)`) and journal (`-wal`/`-shm`) variants
+- **Exclusions**: `exclude_patterns` / `exclude_paths` in config apply to every deletion (portable, system, custom, deep sweep)
+- All deletes go through a `SafetyGuard` per root; every node under a deleted directory is validated, so protected/excluded subtrees survive; counters advance only after a verified delete; errors are counted, never fatal
 
 ## Requirements
 
@@ -86,12 +86,12 @@ Add `--delete` to actually remove files. `--dry-run` forces preview even when
 |---|---|
 | `--cli` | Force console mode |
 | `--portable` / `--system` / `--custom` | Select cleaning layers (default: dry-run preview) |
-| `--all` | All layers at once |
+| `--all` | All layers at once using **safe** system-target defaults (Recycle Bin / DNS / Windows Update stay off) |
 | `--delete` | **Real delete** (without it the run is a dry-run preview) |
 | `--dry-run` | Force preview even with `--delete` |
 | `--status` | Show how much junk exists per target; nothing is deleted |
 | `--analyze-caches` | Discover AppData cache folders > 5 MB |
-| `--sys-targets` | Comma list of system targets to force-enable (`System Temp`, `User Temp`, ...) |
+| `--sys-targets` | Comma list of system targets to force-enable (`System Temp`, `User Temp`, `Recycle Bin`, ...); unknown names error out |
 | `--exclude` | Comma list of extra exclude patterns (`--exclude "*.db,*.tmp"`) |
 | `--hidden` | Hide console window (used by Task Scheduler) |
 | `--install-task` | Register the daily silent full-clean task |
@@ -151,7 +151,7 @@ Example:
 - `portable_roots`: folders whose known-junk subfolders are swept (pattern-based, e.g. `Cache`, `Temp`, `Logs`, numbered backups). Anything not matching junk patterns is untouched.
 - `custom_rules`: `path` (folder) + `pattern` (glob, `*` = whole contents).
 - `exclude_patterns` / `exclude_paths`: extra no-go lists.
-- `lang`: GUI language — `en` (default), `ru`, `et`. Built-in `strings/*.json` live next to the script (or bundled into the exe); drop your own `<lang>.json` there to add a language.
+- `lang`: GUI language — `en` (default), `ru`, `et`, `ded`. Built-in `strings/*.json` live next to the script (or bundled into the exe); drop your own `<lang>.json` there to add a language.
 
 ## Tests
 

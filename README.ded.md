@@ -135,7 +135,7 @@ schtasks /Delete /TN SmartVACCleaner /F
 - `portable_roots`: папки, внутри которых ищем мусорные шаблоны (Cache, Temp, Logs). Остальное не трогаем.
 - `custom_rules`: `path` (папка) + `pattern` (маска, `*` = всё).
 - `exclude_patterns` / `exclude_paths`: что не трогать.
-- `lang`: язык — `en` (дефолт), `ru`, `et`. Файлики `strings/*.json` лежат рядом (или вшиты в exe). Кинь свой `<lang>.json`, чтоб добавить.
+- `lang`: язык — `en` (дефолт), `ru`, `et`, `ded`. Файлики `strings/*.json` лежат рядом (или вшиты в exe). Кинь свой `<lang>.json`, чтоб добавить.
 
 ## Тесты
 

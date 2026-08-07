@@ -8,12 +8,12 @@ Add `--delete` to actually remove files. `--dry-run` forces preview even when
 |---|---|
 | `--cli` | Force console mode |
 | `--portable` / `--system` / `--custom` | Select cleaning layers (default: dry-run preview) |
-| `--all` | All layers at once |
+| `--all` | All layers at once (portable + system + custom) using **safe** system-target defaults; risky opt-ins (Recycle Bin, DNS, Windows Update) stay OFF |
 | `--delete` | **Real delete** (without it the run is a dry-run preview) |
 | `--dry-run` | Force preview even with `--delete` |
 | `--status` | Show how much junk exists per target; nothing is deleted |
-| `--analyze-caches` | Scan `%LOCALAPPDATA%`/`%APPDATA%` for cache/temp/log/crash folders over 5 MB and print the biggest -- cache discovery for auditing, nothing is deleted |
-| `--sys-targets` | Comma list of system targets to force-enable (`System Temp`, `User Temp`, ...) |
+| `--analyze-caches` | Scan `%LOCALAPPDATA%`/`%APPDATA%` for cache/temp/log/crash folders over 5 MB and print the biggest — cache discovery for auditing, nothing is deleted |
+| `--sys-targets` | Comma list of system targets to force-enable (`System Temp`, `User Temp`, `Recycle Bin`, `DNS Cache`, `Windows Update Cache`, ...). Unknown names error out (exit code 2) instead of silently no-oping |
 | `--exclude` | Comma list of extra exclude patterns (`--exclude "*.db,*.tmp"`) |
 | `--hidden` | Hide console window (used by Task Scheduler) |
 | `--install-task` | Register the daily silent full-clean task |
@@ -25,11 +25,14 @@ Examples:
 REM preview everything
 python _SMART_VAC_CLEANER.py --cli --all
 
-REM actually delete everything
+REM actually delete everything (safe system targets; risky opt-ins stay off)
 python _SMART_VAC_CLEANER.py --cli --all --delete
 
 REM preview, then real delete, dry-run flag always wins
 python _SMART_VAC_CLEANER.py --cli --all --delete --dry-run
+
+REM include risky opt-in system actions (Recycle Bin, DNS, Windows Update)
+python _SMART_VAC_CLEANER.py --cli --all --delete --sys-targets "Recycle Bin,DNS Cache,Windows Update Cache"
 
 REM how much junk exists
 python _SMART_VAC_CLEANER.py --status

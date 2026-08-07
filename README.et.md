@@ -149,7 +149,7 @@ Näide:
 - `portable_roots`: kaustad, mille tuntud prügialamkaustad pühitakse (nt `Cache`, `Temp`, `Logs`, nummerdatud varukoopiad). Kõik, mis prügimustritele ei sobi, jääb puutumata.
 - `custom_rules`: `path` (kaust) + `pattern` (glob, `*` = kogu sisu).
 - `exclude_patterns` / `exclude_paths`: täiendavad keelatud nimekirjad.
-- `lang`: liidese keel — `en` (vaikimisi), `ru`, `et`. Sisseehitatud `strings/*.json` asuvad skripti kõrval (või on exe sisse pakitud); oma keele lisamiseks pane sinna `<lang>.json`.
+- `lang`: liidese keel — `en` (vaikimisi), `ru`, `et`, `ded`. Sisseehitatud `strings/*.json` asuvad skripti kõrval (või on exe sisse pakitud); oma keele lisamiseks pane sinna `<lang>.json`.
 
 ## Testid
 

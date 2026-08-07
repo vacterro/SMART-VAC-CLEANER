@@ -2,21 +2,7 @@
 import os
 from pathlib import Path
 
-
-def get_size(p):
-    total = 0
-    try:
-        if p.is_file():
-            return p.stat().st_size
-        for root, _, files in os.walk(p):
-            for f in files:
-                try:
-                    total += os.path.getsize(os.path.join(root, f))
-                except OSError:
-                    pass
-    except Exception:
-        pass
-    return total
+from _fs_helpers import get_size
 
 
 def main():

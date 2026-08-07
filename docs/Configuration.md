@@ -18,13 +18,16 @@ on first run, with defaults.
 ## Keys
 
 - `portable_roots` — folders whose known-junk subfolders are swept (names like
-  `Cache`, `Code Cache`, `GPUCache`, `Temp`, `Logs`, `Crashpad`, numbered
-  backups). Anything not matching junk patterns is untouched.
+  `Cache`, `Code Cache`, `GPUCache`, `Temp`, `Logs`, `Crashpad`). Numbered
+  copies (`Name (2)`) are only removed when the base name is a proven
+  cache/temp/log/crash artifact — profile-data backups such as `Login Data (2)`
+  or `History (3)` are always kept. Anything not matching junk patterns is
+  untouched.
 - `custom_rules` — `path` (folder) + `pattern` (glob, `*` = whole contents).
 - `exclude_patterns` — fnmatch patterns, applied to every deletion.
 - `exclude_paths` — exact paths never touched.
 - `auto_clean_interval_hours` — GUI auto-reclean interval; `0` = off.
-- `lang` — GUI language: `en`, `ru`, or `et`; any missing string falls back
+- `lang` — GUI language: `en`, `ru`, `et`, or `ded`; any missing string falls back
   to English. Read at GUI start.
 - `window_geometry` — last GUI window size/position, saved on close and
   restored on start; `""` means the default geometry (clamped to a minimum

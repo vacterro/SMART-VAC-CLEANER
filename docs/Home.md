@@ -16,9 +16,9 @@ Smart, safe, layered junk cleaner for Windows. GUI + CLI + Task Scheduler.
 - Dry-run by default; `--delete` is explicit (CLI) / confirm dialog (GUI)
 - Fully portable: config and logs live next to the script or the exe
 - Zero hardcoded user paths: portable roots are candidates, only existing ones are swept
-- GUI is localized: English / Russian / Estonian (`lang` in config, `strings/` bundle in the exe)
+- GUI is localized: English / Russian / Estonian / Dedicated (`lang` in config, `strings/` bundle in the exe)
 - GUI Exclusions editor for never-delete patterns and paths; live per-category progress dashboard
-- 86 automated tests, ruff-clean, CI on GitHub Actions
+- 125 automated tests, ruff-clean, CI on GitHub Actions
 
 ## Pages
 

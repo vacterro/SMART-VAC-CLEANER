@@ -32,8 +32,8 @@ Installs the `vac-cleaner` console command.
 
 Download `SmartVACCleaner.exe` from the GitHub Releases tab — fully
 portable, config and logs live next to the exe. The GUI strings bundle
-(`strings/et.json`, `strings/ru.json`) is embedded in the exe, so all three
-languages work offline.
+(`strings/et.json`, `strings/ru.json`, `strings/ded.json`) is embedded in
+the exe, so all four languages work offline.
 
 Build it yourself:
 
@@ -50,7 +50,7 @@ tag, CI builds and uploads the exe as an artifact automatically.
 python -m pytest -q
 ```
 
-Runs offline, touches only temp directories (86 tests).
+Runs offline, touches only temp directories (125 tests).
 
 ## CI
 

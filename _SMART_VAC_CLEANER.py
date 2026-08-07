@@ -25,13 +25,14 @@ GUI for interactive use + CLI for automated Task Scheduler execution.
 
 import argparse
 import concurrent.futures
+import csv
 import fnmatch
 import json
 import logging
 import os
 import queue
 import re
-import shutil
+import stat
 import subprocess
 import sys
 import threading
@@ -147,6 +148,42 @@ APP_PROCESSES: dict[str, set[str]] = {
 
     "telegram": {"telegram.exe"},
 
+    "chrome":   {"chrome.exe"},
+
+    "edge":     {"msedge.exe"},
+
+    "discord":  {"discord.exe"},
+
+    "ollama":   {"ollama.exe", "ollama app.exe"},
+
+    "maxonapp": {"maxonapp.exe"},
+
+    "photoshop": {"photoshop.exe"},
+
+    "razer":    {"razerappengine.exe"},
+
+    "epic":     {"epicgameslauncher.exe"},
+
+    "code":     {"code.exe"},
+
+    "claude":   {"claude.exe", "claude desktop.exe"},
+
+    "bridge":   {"bridge.exe"},
+
+    "qbittorrent": {"qbittorrent.exe"},
+
+    "megasync": {"megasync.exe"},
+
+    "drivefs":  {"googledrivesync.exe", "drivefs.exe"},
+
+    "obs":      {"obs64.exe", "obs32.exe"},
+
+    "listary":  {"listary.exe"},
+
+    "eagle":    {"eagle.exe"},
+
+    "freefilesync": {"freefilesync.exe", "ffs.exe", "realtimesync.exe"},
+
     "general":  set(),
 
 }
@@ -157,6 +194,10 @@ NEVER_DELETE_NAMES: frozenset = frozenset({
     "login data", "login data for account", "bookmarks", "bookmarks.bak",
 
     "preferences", "secure preferences", "web data", "local state",
+
+    "history", "shortcuts", "top sites", "favicons", "reporting and nel",
+
+    "session storage", "local storage", "databases", "indexeddb",
 
     "extensions", "local extension settings", "managed extension settings",
 
@@ -174,20 +215,78 @@ NEVER_DELETE_NAMES: frozenset = frozenset({
 
     "key_datas", "settingss", "a7fdf864fbc10b77", "d877f783d5d3ef8c",
 
+    # profile / account / security / session state lost in runtime deletions (P0-5)
+    "passkey_enclave_state", "trusted_vault.pb", "affiliation database",
+    "browsingtopicsstate", "sharedstorage", "interestgroups", "privateaggregation",
+    "downloadmetadata", "dips", "network action predictor",
+    "heavy_ad_intervention_opt_out.db", "parcel_tracking_db", "coupon_db",
+    "discounts_db", "commerce_subscription_db", "autofillstrikedatabase",
+    "budgetdatabase", "site characteristics database", "segmentation platform",
+    "shared_proto_db", "optimization_guide_hint_cache_store",
+    "optimization_guide_model_metadata_store", "feature engagement tracker",
+    "download service", "persistentorigintrials", "safe browsing network",
+    "gcm store", "platform notifications", "safe browsing", "p3aconfig",
+    "variations", "safetytips", "tpcdmetadata", "zxcvbndata", "hyphen-data",
+    "crowd deny", "meipreload", "origintrials", "pkimetadata",
+    "sslerrorassistant", "certificaterevocation", "filetypepolicies",
+    "firstpartysetspreloaded", "autofillstates", "trusttokenkeycommitments",
+    "subresource filter", "webstore downloads", "ondeviceheadsuggestmodel",
+    "optimizationhints", "optimization_guide_model_store",
+    "sessionstore-backups", "security_state", "datareporting", "safebrowsing",
+    "alternateservices.bin", "sitesecurityservicestate.bin",
+    "bounce-tracking-protection.sqlite", "domain_to_categories.sqlite",
+    "activity-stream.inferred_personalization_feed.json",
+    "activity-stream.weather_feed.json", "shield-preference-experiments.json",
+    "targeting.snapshot.json",
+    # FreeFileSync config / state (P0-1)
+    "global settings.xml", "global settings.xml.ffs_bak",
+    "lastrun.ffs_real", "lastrun.ffs_gui",
+
 })
 
+# Numbered-copy cleanup is explicit junk-only (P0-2). A numbered copy is only
+# deletable when its base name is an unequivocal cache/temp/log/crash artifact.
+# Profile data backups (e.g. "History (2)", "Login Data (3)") are NEVER junk.
+NUMBERED_COPY_JUNK_BASES = frozenset({
+    "cache", "code cache", "gpucache", "shadercache", "dawncache",
+    "dawn graphiteprogramcache", "dawn webgpu cache", "crashpad",
+    "crash reports", "browsermetrics", "local traces", "component_crx_cache",
+    "extensions_crx_cache", "logs", "log", "temp", "tmp",
+})
 
-CHROMIUM_PROFILE_DIRS = ["Cache", "Code Cache", "GPUCache", "DawnCache", "DawnGraphiteCache", "DawnWebGPUCache", "blob_storage", "VideoDecodeStats", "WebrtcVideoStats", "JumpListIconsMostVisited", "JumpListIconsRecentClosed", "Segmentation Platform", "shared_proto_db", "optimization_guide_hint_cache_store", "optimization_guide_model_metadata_store", "parcel_tracking_db", "coupon_db", "discounts_db", "commerce_subscription_db", "AutofillStrikeDatabase", "BudgetDatabase", "CRXTelemetry", "Feature Engagement Tracker", "Site Characteristics Database", "Download Service", "PersistentOriginTrials", "Safe Browsing Network", "GCM Store", "Platform Notifications"]
+# SQLite/journal/backup tails that still refer to the protected base name.
+_NAME_TAIL_RE = re.compile(r"-(?:journal|wal|shm|old|bak)$")
 
-CHROMIUM_SW_SUBDIRS = ["CacheStorage", "ScriptCache", "Database"]
 
-CHROMIUM_PROFILE_FILES = ["Affiliation Database", "Affiliation Database-journal", "BrowsingTopicsSiteData", "BrowsingTopicsSiteData-journal", "BrowsingTopicsState", "InterestGroups", "InterestGroups-wal", "SharedStorage", "SharedStorage-wal", "heavy_ad_intervention_opt_out.db", "heavy_ad_intervention_opt_out.db-journal", "DIPS", "DIPS-journal", "Network Action Predictor", "Network Action Predictor-journal", "LOCK", "LOG", "LOG.old", "DownloadMetadata", "PrivateAggregation", "PrivateAggregation-journal", "passkey_enclave_state", "trusted_vault.pb"]
+def _name_variants(name_lower: str) -> list[str]:
+    """Yield mechanical variants of a name for never-delete matching.
 
-CHROMIUM_NETWORK_FILES = ["Reporting and NEL", "Reporting and NEL-journal", "SCT Auditing Pending Reports", "NetworkDataMigrated"]
+    Covers 'cookies (2)', 'Login Data-journal', 'Logins.json (3)' etc. so a
+    numbered or journal-suffixed protected name can never slip through by
+    failing the exact-name comparison.
+    """
+    variants = [name_lower]
+    m = re.match(r"^(.+?) \(\d+\)$", name_lower)
+    if m:
+        base = m.group(1)
+        variants.append(base)
+        variants.append(_NAME_TAIL_RE.sub("", base))
+    else:
+        variants.append(_NAME_TAIL_RE.sub("", name_lower))
+    return [v.strip() for v in variants if v.strip()]
 
-CHROMIUM_USERDATA_DIRS = ["BrowserMetrics", "Local Traces", "Crashpad", "ShaderCache", "GrShaderCache", "GraphiteDawnCache", "component_crx_cache", "extensions_crx_cache", "optimization_guide_model_store", "segmentation_platform", "OnDeviceHeadSuggestModel", "OptimizationHints", "Safe Browsing", "SafetyTips", "TpcdMetadata", "ZxcvbnData", "hyphen-data", "Crowd Deny", "MEIPreload", "OriginTrials", "PKIMetadata", "SSLErrorAssistant", "CertificateRevocation", "FileTypePolicies", "FirstPartySetsPreloaded", "AutofillStates", "TrustTokenKeyCommitments", "Subresource Filter", "Webstore Downloads"]
 
-CHROMIUM_USERDATA_FILES = ["BrowserMetrics-spare.pma", "Variations"]
+CHROMIUM_PROFILE_DIRS = ["Cache", "Code Cache", "GPUCache", "DawnCache", "DawnGraphiteCache", "DawnWebGPUCache", "blob_storage", "VideoDecodeStats", "WebrtcVideoStats", "JumpListIconsMostVisited", "JumpListIconsRecentClosed", "CRXTelemetry"]
+
+CHROMIUM_SW_SUBDIRS = ["CacheStorage", "ScriptCache"]
+
+CHROMIUM_PROFILE_FILES = ["LOCK", "LOG", "LOG.old"]
+
+CHROMIUM_NETWORK_FILES = []
+
+CHROMIUM_USERDATA_DIRS = ["BrowserMetrics", "Local Traces", "Crashpad", "ShaderCache", "GrShaderCache", "GraphiteDawnCache", "component_crx_cache", "extensions_crx_cache"]
+
+CHROMIUM_USERDATA_FILES = ["BrowserMetrics-spare.pma"]
 
 
 
@@ -243,7 +342,7 @@ USER_APPDATA_TARGETS.extend([
     # app logs (Roaming)
     (get_env_path("APPDATA", r"C:\ProgramData") / "Maxon" / "Logs", "Maxon Logs"),
     (get_env_path("APPDATA", r"C:\ProgramData") / "Maxon" / "Temp", "Maxon Temp"),
-    (get_env_path("APPDATA", r"C:\ProgramData") / "FreeFileSync", "FreeFileSync Logs"),
+    (get_env_path("APPDATA", r"C:\ProgramData") / "FreeFileSync" / "Logs", "FreeFileSync Logs"),
     (get_env_path("APPDATA", r"C:\ProgramData") / "obs-studio" / "logs", "obs-studio Logs"),
     (get_env_path("APPDATA", r"C:\ProgramData") / "Google" / "DriveFS" / "Logs", "DriveFS Logs"),
     (get_env_path("APPDATA", r"C:\ProgramData") / "Mega Limited" / "MEGAsync" / "Logs", "MEGAsync Logs"),
@@ -251,7 +350,6 @@ USER_APPDATA_TARGETS.extend([
     (get_env_path("APPDATA", r"C:\ProgramData") / "discord" / "module_data" / "crashlogs", "discord Crash Logs"),
     (get_env_path("APPDATA", r"C:\ProgramData") / "Claude" / "Logs", "Claude Logs"),
     (get_env_path("APPDATA", r"C:\ProgramData") / "Listary" / "UserProfile" / "Cache", "Listary Cache"),
-    (get_env_path("USERPROFILE", r"C:\Users") / "AppData" / "LocalLow" / "NVIDIA" / "PerDriverVersion", "NVIDIA PerDriver DXCache"),
     # Eagle
     (get_env_path("APPDATA", r"C:\ProgramData") / "Eagle" / "eagle-temp", "Eagle Temp"),
     (get_env_path("APPDATA", r"C:\ProgramData") / "Eagle" / "Cache", "Eagle Cache"),
@@ -298,12 +396,10 @@ USER_APPDATA_TARGETS.extend([
     (get_env_path("LOCALAPPDATA", r"C:\Temp") / "Google" / "Chrome" / "User Data" / "Default" / "Code Cache", "Chrome Code Cache"),
     (get_env_path("LOCALAPPDATA", r"C:\Temp") / "Microsoft" / "Edge" / "User Data" / "Default" / "Code Cache", "Edge Code Cache"),
     # misc safe caches / logs
-    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "CEF", "CEF Cache"),
     (get_env_path("LOCALAPPDATA", r"C:\Temp") / "calibre-cache", "Calibre Cache"),
     (get_env_path("LOCALAPPDATA", r"C:\Temp") / "fontconfig", "fontconfig Cache"),
     (get_env_path("LOCALAPPDATA", r"C:\Temp") / "qBittorrent" / "logs", "qBittorrent Logs"),
     (get_env_path("LOCALAPPDATA", r"C:\Temp") / "claude-cli-nodejs" / "Cache", "Claude CLI Cache"),
-    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "DaVinci Resolve Welcome", "Resolve Welcome Cache"),
     # New findings (v2.4.8)
     (get_env_path("LOCALAPPDATA", r"C:\Temp") / "Mega Limited" / "MEGAsync" / "logs", "MEGAsync Logs (Local)"),
     (get_env_path("APPDATA", r"C:\ProgramData") / "Devin" / "Cache", "Devin Cache"),
@@ -364,7 +460,6 @@ USER_APPDATA_TARGETS.extend([
     (get_env_path("LOCALAPPDATA", r"C:\Temp") / "Razer" / "RazerAppEngine" / "User Data" / "Default" / "Cache", "Razer Engine Cache"),
     (get_env_path("LOCALAPPDATA", r"C:\Temp") / "Razer" / "RazerAppEngine" / "User Data" / "Default" / "Code Cache", "Razer Engine Code Cache"),
     (get_env_path("LOCALAPPDATA", r"C:\Temp") / "Razer" / "RazerAppEngine" / "User Data" / "Default" / "GPUCache", "Razer Engine GPUCache"),
-    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "Razer" / "RazerAppEngine" / "User Data" / "Default" / "Service Worker", "Razer Engine Service Worker"),
     (get_env_path("LOCALAPPDATA", r"C:\Temp") / "EpicGamesLauncher" / "Saved" / "webcache_4430", "Epic webcache (Local)"),
     (get_env_path("APPDATA", r"C:\ProgramData") / "Code" / "WebStorage" / "2" / "CacheStorage", "VS Code WebStorage Cache"),
     (get_env_path("APPDATA", r"C:\ProgramData") / "Code" / "WebStorage" / "3" / "CacheStorage", "VS Code WebStorage Cache (2)"),
@@ -389,99 +484,102 @@ USER_APPDATA_TARGETS.extend([
     (get_env_path("APPDATA", r"C:\ProgramData") / "Opera Software" / "Opera Stable" / "Service Worker" / "ScriptCache", "Opera SW ScriptCache"),
 ])
 
-
-SYSTEM_SAFE_ROOTS = {
-
-    SYSTEM_TEMP.resolve(),
-
-    USER_TEMP.resolve(),
-
-    USER_CRASH.resolve(),
-
-    USER_EXPLORER.resolve()
-
+# Process owners for app-sensitive targets (P1-9): if the owning app is running
+# (or the process table is UNKNOWN), the target is skipped.
+_TARGET_APP_GROUPS: dict[str, str | None] = {
+    "Discord Cache": "discord", "Discord Code Cache": "discord", "discord Logs": "discord",
+    "discord Crash Logs": "discord", "Discord CRX Cache": "discord",
+    "Chrome Cache (C:)": "chrome", "Chrome Shader Cache (C:)": "chrome", "Chrome Code Cache": "chrome",
+    "Edge Cache (C:)": "edge", "Edge Code Cache": "edge",
+    "Opera Cache (C:)": "opera", "Opera Code Cache (C:)": "opera", "Opera Shader Cache (C:)": "opera",
+    "Opera System Cache (C:)": "opera", "Opera Crash Reports (C:)": "opera", "Opera CRX Cache": "opera",
+    "Opera SW CacheStorage": "opera", "Opera SW ScriptCache": "opera",
+    "Brave Cache": "brave", "Brave Code Cache": "brave", "Brave GPU Cache": "brave", "Brave CRX Cache": "brave",
+    "Telegram Cache (C:)": "telegram", "Telegram Media Cache (C:)": "telegram",
+    "Razer Cache": "razer", "Razer Code Cache": "razer", "Razer SW CacheStorage": "razer",
+    "Razer Engine Cache": "razer", "Razer Engine Code Cache": "razer", "Razer Engine GPUCache": "razer",
+    "Ollama WebView Cache": "ollama", "Ollama GPUCache": "ollama", "Ollama Shader Cache": "ollama",
+    "Maxon WebView Cache": "maxonapp", "MaxonApp WebView Cache": "maxonapp",
+    "MaxonApp WebView Code Cache": "maxonapp", "MaxonApp WebView Shader Cache": "maxonapp",
+    "Photoshop WebView Cache": "photoshop", "Photoshop WebView Cache (Local)": "photoshop",
+    "Epic webcache": "epic", "Epic webcache (Local)": "epic",
+    "VS Code VSIX Cache": "code", "VS Code Crashpad": "code", "VS Code CachedData": "code",
+    "VS Code Cache": "code", "VS Code WebStorage Cache": "code", "VS Code WebStorage Cache (2)": "code",
+    "Claude Logs": "claude", "Claude Cache": "claude", "Claude Code Cache": "claude", "Claude GPUCache": "claude",
+    "Claude CLI Cache": "claude",
+    "qBittorrent Logs": "qbittorrent",
+    "MEGAsync Logs": "megasync", "MEGAsync Logs (Local)": "megasync",
+    "DriveFS Logs": "drivefs", "DriveFS Logs (Local)": "drivefs",
+    "obs-studio Logs": "obs",
+    "Listary Cache": "listary",
+    "Eagle Temp": "eagle", "Eagle Cache": "eagle", "Eagle Library Caches": "eagle", "Eagle Crashpad": "eagle",
+    "Adobe Bridge Cache": "bridge", "Adobe Bridge Code Cache": "bridge", "Adobe Bridge GPUCache": "bridge",
+    "FreeFileSync Logs": "freefilesync",
 }
 
-for path, _ in USER_APPDATA_TARGETS:
+USER_APPDATA_TARGETS = [(p, d, _TARGET_APP_GROUPS.get(d)) for p, d in USER_APPDATA_TARGETS]
 
-    try: SYSTEM_SAFE_ROOTS.add(path.resolve())
+def get_running_processes() -> set[str] | None:
+    """Query running process image names.
 
-    except Exception:
-
-        logging.getLogger("vac_cleaner").warning("Failed to resolve path for SYSTEM_SAFE_ROOTS")
-
-
-def get_running_processes() -> set[str]:
-
+    Returns a set of lowercased image names, or None when the query FAILED
+    (tasklist nonzero exit, timeout, parse error). Callers must treat None as
+    UNKNOWN and skip app-sensitive work (fail closed), never as 'nothing runs'.
+    """
     try:
-
         result = subprocess.run(["tasklist", "/fo", "csv", "/nh"], capture_output=True, text=True, timeout=15, check=False)
-
+        if result.returncode != 0:
+            logging.getLogger("vac_cleaner").error(f"tasklist exited with code {result.returncode}")
+            return None
         procs: set[str] = set()
-
-        for line in result.stdout.splitlines():
-
-            parts = line.split(",")
-
-            pname = parts[0].strip().replace('"', '').lower()
-
-            if pname: procs.add(pname)
-
+        for row in csv.reader(result.stdout.splitlines()):
+            if not row:
+                continue
+            pname = row[0].strip().replace('"', "").lower()
+            if pname:
+                procs.add(pname)
         return procs
-
     except Exception as e:
-
         logging.getLogger("vac_cleaner").error(f"Failed to query running processes: {e}")
+        return None
 
-        return set()
+
+def is_app_running(app_group: str, running: set[str] | None) -> bool:
+    """True when any process of `app_group` is running.
+
+    `running` is None (UNKNOWN) when process detection failed. A real process
+    group with an UNKNOWN snapshot is treated as running (fail closed); the
+    empty 'general' group carries no process mapping and never blocks.
+    """
+    procs = APP_PROCESSES.get(app_group, set())
+    if not procs:
+        return False
+    if running is None:
+        return True
+    return bool(procs & running)
 
 
-def is_app_running(app_group: str, running: set[str]) -> bool:
+def _fs_helper_get_size(path: Path) -> int:
+    from _fs_helpers import get_size as _get_size
+    return _get_size(path)
 
-    return bool(APP_PROCESSES.get(app_group, set()) & running)
+
+def is_link(path: Path) -> bool:
+    """True for symlinks and (on Windows) junctions/reparse points."""
+    try:
+        st = path.lstat()
+    except OSError:
+        return False
+    if stat.S_ISLNK(st.st_mode):
+        return True
+    if os.name == "nt":
+        return bool(getattr(st, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT)
+    return False
 
 
 def get_size(path: Path) -> int:
-
-    if not path.exists():
-
-        return 0
-
-    if path.is_file():
-
-        try: return path.stat().st_size
-
-        except OSError: return 0
-
-    total = 0
-
-    stack = [path]
-
-    while stack:
-
-        current = stack.pop()
-
-        try:
-
-            for entry in os.scandir(current):
-
-                if entry.is_file(follow_symlinks=False):
-
-                    try: total += entry.stat().st_size
-
-                    except OSError:
-
-                        pass  # expected: file may be locked during scan
-
-                elif entry.is_dir(follow_symlinks=False) and not entry.is_symlink():
-
-                    stack.append(Path(entry.path))
-
-        except (PermissionError, OSError):
-
-            pass  # expected: dir may be inaccessible
-
-    return total
+    """Total byte size of a file or directory tree (iterative, no recursion)."""
+    return _fs_helper_get_size(path)
 
 
 BYTES_PER_MB = 1_048_576
@@ -664,6 +762,8 @@ class Logger:
 
         bar = "=" * 68
 
+        freed_label = "Would free" if self.dry_run else "Space freed"
+
         msg = (
 
             f"\n+{bar}+\n"
@@ -672,7 +772,7 @@ class Logger:
 
             f"+{bar}+\n"
 
-            f"| Space freed :  {mb:>10.1f} MB  /  {gb:>7.3f} GB{' '*22}|\n"
+            f"| {freed_label:<11}:  {mb:>10.1f} MB  /  {gb:>7.3f} GB{' '*22}|\n"
 
             f"| Items acted :  {self.n_deleted:<50} |\n"
 
@@ -722,6 +822,9 @@ class SafetyGuard:
 
     def is_safe(self, path: Path) -> tuple[bool, str]:
 
+        if is_link(path):
+            return False, "Symlink/reparse point refused"
+
         path = self._canon(path)
 
         try:
@@ -745,9 +848,11 @@ class SafetyGuard:
 
         name_lower = path.name.lower()
 
-        if name_lower in NEVER_DELETE_NAMES:
+        for variant in _name_variants(name_lower):
 
-            return False, f"'{path.name}' is in the never-delete list"
+            if variant in NEVER_DELETE_NAMES:
+
+                return False, f"'{path.name}' is in the never-delete list"
 
 
         # User-defined exclusion patterns (fnmatch)
@@ -816,8 +921,6 @@ class CleanerEngine:
 
         self.log = log
 
-        self.guard = guard
-
         self.root = root
 
         self.max_threads = max_threads
@@ -828,7 +931,18 @@ class CleanerEngine:
 
         self.running = get_running_processes()
 
-        self.deleted_rel_paths: set[Path] = set()
+        self.guard = self.make_guard(guard.base_root, guard.is_system_root)
+
+
+    def make_guard(self, root: Path, is_system_root: bool = False) -> SafetyGuard:
+
+        """Build a guard that inherits the engine's exclusions (global invariant, P0-3)."""
+
+        pats = list(dict.fromkeys(self.exclude_patterns or []))
+
+        paths = list(dict.fromkeys(self.exclude_paths or []))
+
+        return SafetyGuard(root, is_system_root=is_system_root, exclude_patterns=pats, exclude_paths=paths)
 
 
     def check_cancel(self):
@@ -838,160 +952,254 @@ class CleanerEngine:
             raise CancelJobException("Job cancelled by user.")
 
 
-    def _rmtree_onerror(self, func, path, exc_info):
+    def refresh_running(self) -> None:
 
-        try:
+        """Re-query the process table before a destructive app group (P1-8)."""
 
-            os.chmod(path, 0o666)
-
-            func(path)
-
-        except Exception:
-
-            self.log.skipped(Path(path), "File in use or access denied")
+        self.running = get_running_processes()
 
 
-    def _del_dir(self, path: Path, desc: str) -> int:
-
-        if not path.exists() or not path.is_dir(): return 0
-
-        size = get_size(path)
-
-        if self.progress: self.progress.advance(size)
-
-        try:
-
-            self.deleted_rel_paths.add(path.relative_to(self.root))
-
-        except ValueError:
-
-            self.log.warning(f"Could not record deleted dir relative path: {path}")
-
+    def _log_deleted(self, path: Path, size: int, desc: str) -> None:
 
         self.log.deleted(path, size, desc)
 
-        if not self.dry_run:
 
-            try: shutil.rmtree(path, onerror=self._rmtree_onerror)
+    def _try_unlink(self, path: Path) -> int:
 
-            except Exception as exc:
+        """Attempt one file deletion. Returns bytes actually freed (0 on failure).
 
-                self.log.error(f"rmtree failed for {path}: {exc}")
-
+        No counters or progress are touched here; callers account once, after success.
+        """
+        try:
+            size = path.stat().st_size
+        except OSError:
+            size = 0
+        for attempt in range(2):
+            try:
+                path.chmod(0o666)
+                path.unlink()
+                return size
+            except PermissionError:
+                if attempt == 0:
+                    time.sleep(0.01)  # Windows Defender micro-lock backoff
+                else:
+                    self.log.skipped(path, "File locked by another process")
+                    return 0
+            except Exception:
+                self.log.skipped(path, "File in use or access denied")
                 return 0
-
-        return size
+        return 0
 
 
     def _del_file(self, path: Path, desc: str) -> int:
 
-        if not path.exists() or not path.is_file(): return 0
+        """Delete one file. Counters/log/progress advance only after verified success (P1-12)."""
 
-        try: size = path.stat().st_size
+        self.check_cancel()
 
-        except OSError: size = 0
+        if not path.exists():
+            return 0
 
-        if self.progress: self.progress.advance(size)
+        if is_link(path):
+            self.log.skipped(path, "Symlink/reparse point refused")
+            return 0
+
+        ok, reason = self.guard.is_safe(path)
+        if not ok:
+            self.log.skipped(path, reason)
+            return 0
 
         try:
+            size = path.stat().st_size
+        except OSError:
+            size = 0
 
-            self.deleted_rel_paths.add(path.relative_to(self.root))
+        if self.dry_run:
+            self._log_deleted(path, size, desc)
+            return size
 
-        except ValueError:
-
-            self.log.warning(f"Could not record deleted file relative path: {path}")
-
-
-        self.log.deleted(path, size, desc)
-
-        if not self.dry_run:
-
-            for attempt in range(2):
-
-                try:
-
-                    path.chmod(0o666)
-
-                    path.unlink()
-
-                    break
-
-                except PermissionError:
-
-                    if attempt == 0:
-
-                        time.sleep(0.01) # Windows Defender micro-lock backoff
-
-                    else:
-
-                        self.log.skipped(path, "File locked by another process")
-
-                        return 0
-
-                except Exception:
-
-                    self.log.skipped(path, "File in use or access denied")
-
+        for attempt in range(2):
+            try:
+                path.chmod(0o666)
+                path.unlink()
+                self._log_deleted(path, size, desc)
+                if self.progress:
+                    self.progress.advance(size)
+                return size
+            except PermissionError:
+                if attempt == 0:
+                    time.sleep(0.01)  # Windows Defender micro-lock backoff
+                else:
+                    self.log.skipped(path, "File locked by another process")
                     return 0
+            except Exception:
+                self.log.skipped(path, "File in use or access denied")
+                return 0
+        return 0
 
-        return size
+
+    def _collect_tree(self, path: Path, desc: str) -> tuple[int, bool, list[Path]]:
+        """Guarded recursive delete of everything deletable under `path`.
+
+        Every node is validated via guard.is_safe; protected/excluded/link nodes
+        (and their subtrees) are preserved. Returns (freed_bytes, fully_removed,
+        protected_nodes). Counters/progress/log are NOT touched here.
+        """
+        protected: set[Path] = set()
+
+        # Phase 1: find protected nodes top-down (do not descend into them).
+        stack = [path]
+        while stack:
+            cur = stack.pop()
+            self.check_cancel()
+            ok, _reason = self.guard.is_safe(cur)
+            if not ok or is_link(cur):
+                protected.add(cur)
+                continue
+            try:
+                for entry in os.scandir(cur):
+                    e = Path(entry.path)
+                    if entry.is_dir(follow_symlinks=False):
+                        stack.append(e)
+                    elif not self.guard.is_safe(e)[0] or is_link(e):
+                        protected.add(e)
+            except OSError:
+                protected.add(cur)
+
+        # Phase 2: collect files + dirs bottom-up for deletion.
+        files: list[Path] = []
+        dirs: list[Path] = []
+        stack = [path]
+        while stack:
+            cur = stack.pop()
+            if cur in protected or is_link(cur):
+                continue
+            try:
+                for entry in os.scandir(cur):
+                    e = Path(entry.path)
+                    if entry.is_file(follow_symlinks=False):
+                        files.append(e)
+                    elif entry.is_dir(follow_symlinks=False):
+                        dirs.append(e)
+                        stack.append(e)
+            except OSError:
+                protected.add(cur)
+
+        freed = 0
+        for f in sorted(files, key=lambda p: len(p.parts), reverse=True):
+            if f in protected or is_link(f):
+                continue
+            self.check_cancel()
+            freed += self._try_unlink(f)
+
+        fully = path not in protected
+        for d in sorted(dirs, key=lambda p: len(p.parts), reverse=True):
+            if d in protected or is_link(d):
+                continue
+            self.check_cancel()
+            try:
+                if not any(d.iterdir()):
+                    d.rmdir()
+            except OSError:
+                fully = False
+        if fully:
+            try:
+                if not any(path.iterdir()):
+                    path.rmdir()
+                else:
+                    fully = False
+            except OSError:
+                fully = False
+        return freed, fully, sorted(protected)
+
+
+    def _del_dir(self, path: Path, desc: str) -> int:
+
+        """Delete a directory tree, preserving protected/excluded descendants (P0-4)."""
+
+        self.check_cancel()
+
+        if not path.exists() or not path.is_dir():
+            return 0
+
+        if is_link(path):
+            self.log.skipped(path, "Symlink/reparse point refused")
+            return 0
+
+        ok, reason = self.guard.is_safe(path)
+        if not ok:
+            self.log.skipped(path, reason)
+            return 0
+
+        freed, fully, protected = self._collect_tree(path, desc)
+
+        if self.dry_run:
+            if freed > 0:
+                self._log_deleted(path, freed, desc)
+            return freed
+
+        if fully:
+            self._log_deleted(path, freed, desc)
+        elif freed > 0:
+            self.log.skipped(path, f"Partially removed; kept {len(protected)} protected/excluded item(s)")
+            self._log_deleted(path, freed, f"{desc} (partial)")
+        else:
+            self.log.skipped(path, "Content protected or excluded; nothing deleted")
+        if self.progress and freed > 0:
+            self.progress.advance(freed)
+        return freed
 
 
     def _del_dir_contents(self, path: Path, desc: str) -> int:
 
         if not path.exists() or not path.is_dir(): return 0
 
+        if is_link(path):
+            self.log.skipped(path, "Symlink/reparse point refused")
+            return 0
+
         freed = 0
 
+        items = []
         try:
-
-            with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_threads) as executor:
-
-                active_futures = set()
-
-                for item in path.iterdir():
-
-                    ok, reason = self.guard.is_safe(item)
-
-                    if not ok:
-                        self.log.skipped(item, reason)
-                        continue
-
-
-                    if len(active_futures) >= 2000:
-
-                        done, active_futures = concurrent.futures.wait(active_futures, return_when=concurrent.futures.FIRST_COMPLETED)
-
-                        for f in done:
-
-                            try: freed += f.result()
-
-                            except Exception as e:
-
-                                self.log.warning(f"Thread batch result failed: {e}")
-
-
-                    if item.is_dir():
-
-                        active_futures.add(executor.submit(self._del_dir, item, f"{desc} / {item.name}"))
-
-                    elif item.is_file():
-
-                        active_futures.add(executor.submit(self._del_file, item, f"{desc} / {item.name}"))
-
-
-                for f in concurrent.futures.as_completed(active_futures):
-
-                    try: freed += f.result()
-
-                    except Exception as e:
-
-                        self.log.warning(f"Future result failed: {e}")
-
+            for item in path.iterdir():
+                self.check_cancel()
+                ok, reason = self.guard.is_safe(item)
+                if not ok:
+                    self.log.skipped(item, reason)
+                    continue
+                items.append(item)
         except (PermissionError, OSError):
-
             self.log.warning("Directory iteration failed during content deletion")
 
+        def _handle(item: Path) -> int:
+            self.check_cancel()
+            if is_link(item):
+                self.log.skipped(item, "Symlink/reparse point refused")
+                return 0
+            if item.is_dir():
+                return self._del_dir(item, f"{desc} / {item.name}")
+            if item.is_file():
+                return self._del_file(item, f"{desc} / {item.name}")
+            return 0
+
+        if not items:
+            return 0
+        if self.max_threads > 1 and len(items) > 1:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_threads) as executor:
+                futures = [executor.submit(_handle, item) for item in items]
+                for f in concurrent.futures.as_completed(futures):
+                    try:
+                        freed += f.result()
+                    except CancelJobException:
+                        for fut in futures:
+                            fut.cancel()
+                        raise
+                    except Exception as e:
+                        self.log.warning(f"Future result failed: {e}")
+        else:
+            for item in items:
+                freed += _handle(item)
         return freed
 
 
@@ -999,7 +1207,7 @@ class CleanerEngine:
 
         if is_app_running(app, self.running):
 
-            self.log.skipped(path, f"'{app}' is running")
+            self.log.skipped(path, f"'{app}' is running (or process state unknown)")
 
             return 0
 
@@ -1016,7 +1224,7 @@ class CleanerEngine:
 
         if is_app_running(app, self.running):
 
-            self.log.skipped(path, f"'{app}' is running")
+            self.log.skipped(path, f"'{app}' is running (or process state unknown)")
 
             return 0
 
@@ -1033,7 +1241,7 @@ class CleanerEngine:
 
         if is_app_running(app, self.running):
 
-            self.log.skipped(path, f"'{app}' is running")
+            self.log.skipped(path, f"'{app}' is running (or process state unknown)")
 
             return 0
 
@@ -1071,9 +1279,21 @@ class PortableCleaner(CleanerEngine):
 
                 if not m or int(m.group(2)) < 2: continue
 
-                ok, _reason = self.guard.is_safe(item)
+                base = m.group(1).strip().lower()
 
-                if not ok: continue
+                if base not in NUMBERED_COPY_JUNK_BASES:
+
+                    self.log.skipped(item, f"Numbered copy '{item.name}' is not proven junk; kept")
+
+                    continue
+
+                ok, reason = self.guard.is_safe(item)
+
+                if not ok:
+
+                    self.log.skipped(item, reason)
+
+                    continue
 
                 desc = f"Numbered crash-backup: {item.name}"
 
@@ -1206,6 +1426,8 @@ class PortableCleaner(CleanerEngine):
 
     def clean_cent(self) -> int:
 
+        self.refresh_running()
+
         cdir = self.root / "_CENT"
 
         ud = cdir / "User Data"
@@ -1225,6 +1447,8 @@ class PortableCleaner(CleanerEngine):
 
     def clean_brave(self) -> int:
 
+        self.refresh_running()
+
         bdir = self.root / "__SOFT" / "_BRAVE"
 
         data = bdir / "data"
@@ -1235,7 +1459,7 @@ class PortableCleaner(CleanerEngine):
 
         freed = 0
 
-        for name in list(CHROMIUM_USERDATA_DIRS) + ["P3AConfig"]: freed += self.safe_del_dir(data / name, f"[Brave/UD] {name}", "brave")
+        for name in CHROMIUM_USERDATA_DIRS: freed += self.safe_del_dir(data / name, f"[Brave/UD] {name}", "brave")
 
         for name in CHROMIUM_USERDATA_FILES: freed += self.safe_del_file(data / name, f"[Brave/UD] {name}", "brave")
 
@@ -1248,6 +1472,8 @@ class PortableCleaner(CleanerEngine):
 
     def clean_firefox(self) -> int:
 
+        self.refresh_running()
+
         fdir = self.root / "__SOFT" / "_FIREFOX"
 
         prof = fdir / "Data" / "profile"
@@ -1258,11 +1484,11 @@ class PortableCleaner(CleanerEngine):
 
         freed = 0
 
-        for name in ["cache2", "startupCache", "shader-cache", "thumbnails", "crashes", "minidumps", "datareporting", "safebrowsing", "sessionstore-backups", "security_state"]:
+        for name in ["cache2", "startupCache", "shader-cache", "thumbnails", "crashes", "minidumps"]:
 
             freed += self.safe_del_dir(prof / name, f"[Firefox] {name}", "firefox")
 
-        for name in ["AlternateServices.bin", "SiteSecurityServiceState.bin", "bounce-tracking-protection.sqlite", "bounce-tracking-protection.sqlite-shm", "bounce-tracking-protection.sqlite-wal", "domain_to_categories.sqlite", "domain_to_categories.sqlite-journal", "activity-stream.inferred_personalization_feed.json", "activity-stream.weather_feed.json", "shield-preference-experiments.json", "targeting.snapshot.json", "parent.lock"]:
+        for name in ["parent.lock"]:
 
             freed += self.safe_del_file(prof / name, f"[Firefox] {name}", "firefox")
 
@@ -1270,6 +1496,8 @@ class PortableCleaner(CleanerEngine):
 
 
     def clean_opera(self) -> int:
+
+        self.refresh_running()
 
         odir = self.root / "__SOFT" / "_OPERA"
 
@@ -1281,6 +1509,8 @@ class PortableCleaner(CleanerEngine):
 
 
     def clean_telegram(self) -> int:
+
+        self.refresh_running()
 
         tdir = self.root / "_TG"
 
@@ -1387,6 +1617,15 @@ class SystemCleaner(CleanerEngine):
         self.targets = targets if targets is not None else {}
 
 
+    def _set_guard(self, root: Path) -> SafetyGuard:
+
+        """Switch the active guard to `root`, keeping engine exclusions (P0-3)."""
+
+        self.guard = self.make_guard(root, is_system_root=True)
+
+        return self.guard
+
+
     def run_all(self) -> int:
 
         self.log.section("System Junk (C:\\)")
@@ -1398,9 +1637,7 @@ class SystemCleaner(CleanerEngine):
 
         if self.targets.get("System Temp", True) and SYSTEM_TEMP.exists():
 
-            guard = SafetyGuard(SYSTEM_TEMP, is_system_root=True)
-
-            self.guard = guard
+            self._set_guard(SYSTEM_TEMP)
 
             freed += self._del_dir_contents(SYSTEM_TEMP, "Windows System Temp")
 
@@ -1409,9 +1646,7 @@ class SystemCleaner(CleanerEngine):
 
         if self.targets.get("User Temp", True) and USER_TEMP.exists():
 
-            guard = SafetyGuard(USER_TEMP, is_system_root=True)
-
-            self.guard = guard
+            self._set_guard(USER_TEMP)
 
             freed += self._del_dir_contents(USER_TEMP, "Windows User Temp")
 
@@ -1420,9 +1655,7 @@ class SystemCleaner(CleanerEngine):
 
         if self.targets.get("App CrashDumps", True) and USER_CRASH.exists():
 
-            guard = SafetyGuard(USER_CRASH, is_system_root=True)
-
-            self.guard = guard
+            self._set_guard(USER_CRASH)
 
             freed += self._del_dir_contents(USER_CRASH, "Windows App CrashDumps")
 
@@ -1431,9 +1664,7 @@ class SystemCleaner(CleanerEngine):
 
         if self.targets.get("Explorer Thumbnails", True) and USER_EXPLORER.exists():
 
-            guard = SafetyGuard(USER_EXPLORER, is_system_root=True)
-
-            self.guard = guard
+            guard = self._set_guard(USER_EXPLORER)
 
             try:
 
@@ -1456,15 +1687,22 @@ class SystemCleaner(CleanerEngine):
 
         # Deep AppData Caches
 
-        for target_path, desc in USER_APPDATA_TARGETS:
+        for target_path, desc, *rest in USER_APPDATA_TARGETS:
 
-            if self.targets.get(desc, True) and target_path.exists():
+            app_group = rest[0] if rest else None
 
-                guard = SafetyGuard(target_path, is_system_root=True)
+            if not (self.targets.get(desc, True) and target_path.exists()):
+                continue
 
-                self.guard = guard
+            if app_group:
+                self.refresh_running()
+                if is_app_running(app_group, self.running):
+                    self.log.skipped(target_path, f"'{app_group}' is running (or process state unknown)")
+                    continue
 
-                freed += self._del_dir_contents(target_path, desc)
+            self._set_guard(target_path)
+
+            freed += self._del_dir_contents(target_path, desc)
 
 
         # Windows Update Cache
@@ -1489,19 +1727,26 @@ class SystemCleaner(CleanerEngine):
 
                     import subprocess
 
+                    wuauserv_was_running = None
                     if not self.dry_run:
+                        stop = subprocess.run(["net", "stop", "wuauserv"], capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
+                        # exit 0 = stopped now; exit 2 = already stopped; any other = failure
+                        wuauserv_was_running = (stop.returncode == 0)
+                        if stop.returncode not in (0, 2):
+                            self.log.warning(f"Failed to stop wuauserv (exit {stop.returncode})")
 
-                        subprocess.run(["net", "stop", "wuauserv"], capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
-
-                    guard = SafetyGuard(wu_path, is_system_root=True)
-
-                    self.guard = guard
+                    guard = self._set_guard(wu_path)
 
                     freed += self._del_dir_contents(wu_path, "Windows Update Cache")
 
                     if not self.dry_run:
-
-                        subprocess.run(["net", "start", "wuauserv"], capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
+                        try:
+                            if wuauserv_was_running:
+                                start = subprocess.run(["net", "start", "wuauserv"], capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
+                                if start.returncode != 0:
+                                    self.log.warning(f"Failed to restart wuauserv (exit {start.returncode})")
+                        except Exception as exc:
+                            self.log.warning(f"Failed to restart wuauserv: {exc}")
 
                 else:
 
@@ -1522,9 +1767,15 @@ class SystemCleaner(CleanerEngine):
 
                 try:
 
-                    subprocess.run(["ipconfig", "/flushdns"], capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
+                    result = subprocess.run(["ipconfig", "/flushdns"], capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
 
-                    self.log.info("  [DNS] Successfully flushed DNS Resolver Cache.")
+                    if result.returncode == 0:
+
+                        self.log.info("  [DNS] Successfully flushed DNS Resolver Cache.")
+
+                    else:
+
+                        self.log.warning(f"Failed to flush DNS Resolver Cache (exit {result.returncode})")
 
                 except Exception:
 
@@ -1551,6 +1802,10 @@ class SystemCleaner(CleanerEngine):
 
                     self.log.info("  [Recycle Bin] Successfully emptied the Recycle Bin.")
 
+                else:
+
+                    self.log.warning(f"Recycle Bin empty failed (result {result})")
+
 
         # Deep C: Junk
 
@@ -1567,7 +1822,7 @@ class SystemCleaner(CleanerEngine):
 
         freed = 0
 
-        guard = SafetyGuard(Path("C:\\"))
+        guard = self.make_guard(Path("C:\\"))
 
         loc = get_env_path("LOCALAPPDATA", r"C:\Temp")
 
@@ -1788,9 +2043,9 @@ class CustomCleaner(CleanerEngine):
                 continue
 
 
-            guard = SafetyGuard(target, is_system_root=True)
+            self.guard = self.make_guard(target, is_system_root=True)
 
-            self.guard = guard
+            guard = self.guard
 
 
             try:
@@ -1842,32 +2097,29 @@ BLACKLIST_PATHS = {
 
 
 def is_path_blacklisted(p: Path) -> bool:
+    r"""Reject a protected root AND every descendant of it (P1-10).
 
-    try: p = p.resolve()
-
-    except OSError: return True
-
-
-    # Block exact matches
-
-    if p in BLACKLIST_PATHS: return True
-
-
-    # Block anything inside Windows or Program Files
-
-    windir = Path(os.environ.get("windir", r"C:\Windows")).resolve()
-
+    Protected roots: C:\, Windows, USERPROFILE, Program Files (both), and the
+    cleaner's own source/base dirs. This is the single rule used for portable
+    roots, custom rules and direct deletion.
+    """
     try:
-
-        p.relative_to(windir)
-
+        p = p.resolve()
+    except OSError:
         return True
 
-    except ValueError:
+    if not p.is_absolute():
+        return True
 
-        pass  # path not under windir, which is the expected case
-
-
+    # An ancestor of a protected root is equally dangerous (e.g. C:\ covers
+    # everything); treat any path that equals a protected root or sits under
+    # one as blacklisted.
+    for root in BLACKLIST_PATHS:
+        try:
+            p.relative_to(root)
+            return True
+        except ValueError:
+            continue
     return False
 
 
@@ -2097,23 +2349,12 @@ class ProgressTracker:
             return {'categories': cats, 'total_current': items_done, 'total_bytes': total_bytes, 'total_items_done': items_done, 'total_items_planned': planned, 'elapsed': elapsed, 'current_category': self.current_category}
 
 
-TARGET_MAPPING = {
-    'System Temp': 'System Temp', 'User Temp': 'User Temp',
-    'App CrashDumps': 'App CrashDumps', 'Explorer Thumbnails': 'Explorer Thumbnails',
-    'Windows Update Cache': 'Windows Update Cache', 'DNS Cache': 'DNS Cache',
-    'Recycle Bin': 'Recycle Bin', 'Windows Prefetch': 'Windows Prefetch',
-    'Windows Logs': 'Windows Logs',
-    'Yarn Cache': 'Yarn Cache',
-    'Battle.net Cache': 'Battle.net Cache', 'Epic Games Cache': 'Epic Games Cache',
-    'Steam AppCache': 'Steam AppCache', 'Steam DepotCache': 'Steam DepotCache',
-    'Steam Logs': 'Steam Logs', 'Deep C: Junk': 'Deep C: Junk',
-}
+# Only targets with a real, safe implementation live here (P2-14). Risky
+# opt-in actions default to False and are reachable ONLY via explicit
+# --sys-targets, never via --all (P1-7).
 SYSTEM_TARGET_DEFAULTS = {
     'System Temp': True, 'User Temp': True, 'App CrashDumps': True, 'Explorer Thumbnails': True,
     'Windows Update Cache': False, 'DNS Cache': False, 'Recycle Bin': False,
-    'Windows Prefetch': False, 'Windows Logs': False,
-    'Yarn Cache': False, 'Battle.net Cache': False, 'Epic Games Cache': False,
-    'Steam AppCache': False, 'Steam DepotCache': False, 'Steam Logs': False,
     'Deep C: Junk': True,
 }
 
@@ -2123,11 +2364,22 @@ def calculate_target_sizes(targets):
     if targets.get('User Temp', True) and USER_TEMP.exists(): result['User Temp'] = get_size(USER_TEMP)
     if targets.get('App CrashDumps', True) and USER_CRASH.exists(): result['App CrashDumps'] = get_size(USER_CRASH)
     if targets.get('Explorer Thumbnails', True) and USER_EXPLORER.exists(): result['Explorer Thumbnails'] = get_size(USER_EXPLORER)
-    for t, d in USER_APPDATA_TARGETS:
+    for t, d, *_ in USER_APPDATA_TARGETS:
         if targets.get(d, True) and t.exists(): result[d] = get_size(t)
     return result
 
+def _canonical_exclusions(patterns, paths):
+    """Dedupe + canonicalize exclusions so every cleaner sees one identical set (P0-3)."""
+    pats = list(dict.fromkeys(p for p in (patterns or []) if p and str(p).strip()))
+    pths = []
+    for p in (paths or []):
+        norm = normalize_path(str(p)) if isinstance(p, str) else normalize_path(str(Path(p)))
+        if norm is not None and str(norm) not in pths:
+            pths.append(str(norm))
+    return pats, pths
+
 def run_cleaning_job(dry_run, run_portable, run_system, run_custom, log, max_threads=DEFAULT_THREADS, sys_targets=None, cancel_event=None, exclude_patterns=None, exclude_paths=None, progress=None):
+    exclude_patterns, exclude_paths = _canonical_exclusions(exclude_patterns, exclude_paths)
     log.header(f"Smart VAC Cleaner v{VERSION} | {'DRY-RUN' if dry_run else 'DELETE MODE'} | {datetime.now().astimezone()}")
     if dry_run: log.info('[DRY-RUN] Nothing will be deleted.')
     else: log.info('[WARNING] DELETE MODE active!')
@@ -2139,8 +2391,7 @@ def run_cleaning_job(dry_run, run_portable, run_system, run_custom, log, max_thr
         if progress: progress.start_category('Portable')
         for r in roots:
             if cancel_event and cancel_event.is_set(): raise CancelJobException('Cancelled')
-            guard = SafetyGuard(r, exclude_patterns=exclude_patterns, exclude_paths=exclude_paths)
-            PortableCleaner(dry_run, log, guard, r, max_threads, cancel_event, exclude_patterns=exclude_patterns, exclude_paths=exclude_paths, progress=progress).run_all()
+            PortableCleaner(dry_run, log, SafetyGuard(r), r, max_threads, cancel_event, exclude_patterns=exclude_patterns, exclude_paths=exclude_paths, progress=progress).run_all()
         if progress: progress.finish_category()
     if run_system:
         if cancel_event and cancel_event.is_set(): raise CancelJobException('Cancelled')
@@ -2169,15 +2420,6 @@ def cli_status():
     total = sum(sizes.values())
     print(f'  {"-"*30}')
     print(f'  {fmt(total):>10}  TOTAL')
-
-
-JUNK_KEYWORDS = {
-    'cache', 'caches', 'code cache', 'gpucache', 'shadercache', 'dawncache',
-    'temp', 'tmp', 'temporary', 'tempor',
-    'crash', 'crashdumps', 'crashpad', 'dumps',
-    'logs', 'log', 'old', 'backup', 'backups',
-    'blob_storage', 'storage', 'videodecodestats',
-}
 
 
 # ── Vintage Dark-Golden token map (UI.md spec) ──────────────────────
@@ -2223,13 +2465,13 @@ class App(ctk.CTk):
         self.minsize(800, 500)
         self.configure(fg_color=WIN95_BG)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
-        self.config = load_config()
         self.progress = ProgressTracker()
         self.log_queue = queue.Queue()
         self.cancel_event = threading.Event()
         self._clean_in_progress = False
         self._clean_timer = None
         self._bg_proc = None
+        self._worker_thread = None
         self._dashboard_after_id = None
         self.dash_cat_widgets = {}
         self._build_ui()
@@ -2299,6 +2541,8 @@ class App(ctk.CTk):
 
     def _full_exit(self):
         self.cancel_event.set()
+        if self._worker_thread and self._worker_thread.is_alive():
+            self._worker_thread.join(timeout=5)  # P1-13: never exit while a worker still mutates FS
         if self._dashboard_after_id:
             try:
                 self.after_cancel(self._dashboard_after_id)
@@ -2315,6 +2559,7 @@ class App(ctk.CTk):
                 parent=self, icon="warning", default="no"):
             return
         self._rebuild_cat_bars()
+        self._reset_dashboard()
         self._clean_in_progress = True
         self.cancel_event.clear()
         self.btn_clean.configure(state="disabled")
@@ -2323,13 +2568,14 @@ class App(ctk.CTk):
         self.text_log.delete("1.0", "end")
         self.text_log.configure(state="disabled")
         self.progress = ProgressTracker()
-        t = threading.Thread(target=self._run_job, daemon=True)
-        t.start()
+        self._worker_thread = threading.Thread(target=self._run_job, daemon=True)
+        self._worker_thread.start()
 
     def _run_job(self):
         try:
             log = Logger(BASE_DIR/"logs"/f"clean_{datetime.now().astimezone():%Y%m%d_%H%M%S}.log", False, gui_callback=self._log)
-            all_targets = {k: True for k in SYSTEM_TARGET_DEFAULTS}
+            # Safe defaults: risky opt-in targets stay off unless explicitly enabled (P1-7).
+            all_targets = dict(SYSTEM_TARGET_DEFAULTS)
             run_cleaning_job(False, True, True, True, log, DEFAULT_THREADS, all_targets, self.cancel_event, progress=self.progress, exclude_patterns=self.config.get('exclude_patterns'), exclude_paths=self.config.get('exclude_paths'))
         except CancelJobException:
             self._log(self.T["cancelled"])
@@ -2340,7 +2586,8 @@ class App(ctk.CTk):
 
     def _finish_job(self):
         self._clean_in_progress = False
-        self._reset_dashboard()
+        self._worker_thread = None
+        # Keep the final dashboard snapshot visible instead of wiping it (P2-16).
         self.btn_clean.configure(state="normal")
         self.btn_stop.configure(state="disabled")
         self._schedule_auto_clean()
@@ -2435,7 +2682,7 @@ class App(ctk.CTk):
             d.rectangle([2, 2, 13, 13], outline=(200, 168, 78))
             d.line([4, 8, 12, 8], fill=(200, 168, 78))
             d.line([8, 4, 8, 12], fill=(200, 168, 78))
-            def on_cl(ic, it): ic.stop(); self.after(0, self._start_job)
+            def on_cl(ic, it): self.after(0, self._start_job)  # keep the tray icon alive (P2-16)
             def on_ex(ic, it): ic.stop(); self.after(0, self._full_exit)
             self._tray_icon = pystray.Icon("vac_cleaner", img, "VAC", pystray.Menu(pystray.MenuItem(self.T["clean"], on_cl), pystray.MenuItem("Exit", on_ex)))
             self._tray_icon.run_detached()
@@ -2552,23 +2799,33 @@ def _hide_console():
 TASK_NAME = "SmartVACCleaner"
 
 
-def scheduled_task_command() -> str:
-    """Command line for the scheduled silent full-clean task."""
-    if getattr(sys, "frozen", False):
-        return f'"{sys.executable}" --cli --all --delete --hidden'
-    pythonw = _get_pythonw()
-    return f'"{pythonw}" "{SCRIPT_PATH}" --cli --all --delete --hidden'
+def clean_argv() -> list[str]:
+    """Canonical argv for a silent full-clean (scheduled + background share this, T-067).
 
-
-def background_clean_argv() -> list[str]:
-    """Argv for a detached silent background full-clean (no console, no GUI)."""
+    --all here means portable+system+custom with SAFE system-target defaults;
+    the risky opt-in targets (Recycle Bin, DNS, Windows Update) stay off unless
+    enabled explicitly via --sys-targets.
+    """
     if getattr(sys, "frozen", False):
         return [sys.executable, "--cli", "--all", "--delete", "--hidden"]
     return [_get_pythonw(), str(SCRIPT_PATH), "--cli", "--all", "--delete", "--hidden"]
 
 
-def install_task(time_str: str) -> None:
-    """Register daily silent full-clean task in Windows Task Scheduler."""
+def scheduled_task_command() -> str:
+    """Command line for the scheduled silent full-clean task."""
+    return subprocess.list2cmdline(clean_argv())
+
+
+def background_clean_argv() -> list[str]:
+    """Argv for a detached silent background full-clean (no console, no GUI)."""
+    return clean_argv()
+
+
+def install_task(time_str: str) -> bool:
+    """Register daily silent full-clean task in Windows Task Scheduler.
+
+    Returns True on success so callers can propagate a nonzero CLI outcome.
+    """
     tr = scheduled_task_command()
     result = subprocess.run(
         ['schtasks', '/create',
@@ -2582,8 +2839,9 @@ def install_task(time_str: str) -> None:
     )
     if result.returncode == 0:
         print(f"Task '{TASK_NAME}' installed -> runs daily at {time_str}, silent full clean.")
-    else:
-        print(f"schtasks error: {result.stderr.strip()}")
+        return True
+    print(f"schtasks error: {result.stderr.strip()}")
+    return False
 
 
 def main():
@@ -2610,8 +2868,7 @@ def main():
 
     # ── install-task ──────────────────────────────────────────────────────────
     if args.install_task:
-        install_task(args.time)
-        return
+        sys.exit(0 if install_task(args.time) else 1)
 
     # ── status ────────────────────────────────────────────────────────────────
     if args.status:
@@ -2634,11 +2891,18 @@ def main():
         rp = args.portable or args.all
         rs = args.system or args.all
         rc = args.custom or args.all
+        # --all / scheduled / background NEVER enable risky opt-in targets;
+        # they use the safe SYSTEM_TARGET_DEFAULTS (P1-7).
         st = dict(SYSTEM_TARGET_DEFAULTS)
         if args.sys_targets:
-            for t in args.sys_targets.split(","): st[t.strip()] = True
-        elif args.all:
-            st = {k: True for k in SYSTEM_TARGET_DEFAULTS}
+            for t in args.sys_targets.split(","):
+                name = t.strip()
+                if not name:
+                    continue
+                if name not in SYSTEM_TARGET_DEFAULTS:
+                    print(f"Error: unknown system target '{name}'. Known: {', '.join(SYSTEM_TARGET_DEFAULTS)}")
+                    sys.exit(2)
+                st[name] = True
         ep = [p.strip() for p in args.exclude.split(",") if p.strip()]
         log = Logger(
             BASE_DIR / "logs" / f"clean_{datetime.now().astimezone():%Y%m%d_%H%M%S}.log",
@@ -2648,7 +2912,7 @@ def main():
             dry_run, rp, rs, rc, log,
             max_threads=DEFAULT_THREADS,
             sys_targets=st,
-            exclude_patterns=ep,
+            exclude_patterns=config.get("exclude_patterns", []) + ep,
             exclude_paths=config.get("exclude_paths", [])
         )
         return
