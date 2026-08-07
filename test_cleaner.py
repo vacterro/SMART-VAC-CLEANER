@@ -1543,10 +1543,12 @@ class TestGuiThreadBoundary(unittest.TestCase):
         def set(self, *a, **k):
             return None
 
-    def _fake_app(self, after_mode="record"):
+    @staticmethod
+    def _fake_app(after_mode="record"):
         app = object.__new__(vac.App)
         app.log_queue = queue.Queue()
         app.cancel_event = threading.Event()
+        app.sys_targets = dict(vac.SYSTEM_TARGET_DEFAULTS)
         app.config = {"exclude_patterns": [], "exclude_paths": [], "auto_clean_interval_hours": 0}
         app.progress = vac.ProgressTracker()
         app._clean_in_progress = False
@@ -1554,10 +1556,10 @@ class TestGuiThreadBoundary(unittest.TestCase):
         app._job_done_event = threading.Event()
         app._worker_thread = None
         app._clean_timer = None
-        app.text_log = self._Stub()
-        app.dash_stats = self._Stub()
-        app.dash_bar = self._Stub()
-        app.dash_cat_container = self._Stub()
+        app.text_log = TestGuiThreadBoundary._Stub()
+        app.dash_stats = TestGuiThreadBoundary._Stub()
+        app.dash_bar = TestGuiThreadBoundary._Stub()
+        app.dash_cat_container = TestGuiThreadBoundary._Stub()
         app.dash_cat_widgets = {}
         app.T = {"cancelled": "cancelled"}
         if after_mode == "boom":
@@ -1724,6 +1726,49 @@ class TestWindowsUpdateTransaction(unittest.TestCase):
         with patch.object(vac.subprocess, "run", side_effect=AssertionError("dry-run service mutation")), \
              patch.object(vac, "get_running_processes", return_value=set()):
             c.run_all()
+
+
+class TestGuiSystemTargets(unittest.TestCase):
+    """T-105: GUI opt-in for risky system targets via System Targets dialog."""
+
+    def _app(self):
+        return TestGuiThreadBoundary._fake_app(None)
+
+    def test_gui_defaults_match_safe_defaults(self):
+        """App starts with SYSTEM_TARGET_DEFAULTS: risky targets OFF."""
+        app = self._app()
+        self.assertEqual(app.sys_targets, vac.SYSTEM_TARGET_DEFAULTS)
+        self.assertFalse(app.sys_targets["Recycle Bin"])
+        self.assertFalse(app.sys_targets["DNS Cache"])
+        self.assertFalse(app.sys_targets["Windows Update Cache"])
+
+    def test_run_job_passes_gui_sys_targets(self):
+        """Opt-in via dialog reaches run_cleaning_job unchanged."""
+        app = self._app()
+        app.sys_targets = dict(vac.SYSTEM_TARGET_DEFAULTS)
+        app.sys_targets["Recycle Bin"] = True
+        captured = {}
+        def fake_job(dry_run, run_portable, run_system, run_custom, log, max_threads, sys_targets, cancel_event=None, exclude_patterns=None, exclude_paths=None, progress=None):
+            captured["sys_targets"] = sys_targets
+        with patch.object(vac, "run_cleaning_job", side_effect=fake_job), \
+             patch.object(vac, "Logger"):
+            app._run_job()
+        self.assertTrue(captured["sys_targets"]["Recycle Bin"])
+        self.assertFalse(captured["sys_targets"]["DNS Cache"])
+        self.assertFalse(captured["sys_targets"]["Windows Update Cache"])
+
+    def test_gui_defaults_never_auto_enable_risky(self):
+        """A fresh GUI run passes only safe defaults, even with --all semantics."""
+        app = self._app()
+        captured = {}
+        def fake_job(dry_run, run_portable, run_system, run_custom, log, max_threads, sys_targets, cancel_event=None, exclude_patterns=None, exclude_paths=None, progress=None):
+            captured["sys_targets"] = sys_targets
+        with patch.object(vac, "run_cleaning_job", side_effect=fake_job), \
+             patch.object(vac, "Logger"):
+            app._run_job()
+        self.assertFalse(captured["sys_targets"]["Recycle Bin"])
+        self.assertFalse(captured["sys_targets"]["DNS Cache"])
+        self.assertFalse(captured["sys_targets"]["Windows Update Cache"])
 
 
 class TestI18nSymmetry(unittest.TestCase):

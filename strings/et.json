@@ -20,5 +20,9 @@
   "exc_remove": "Eemalda",
   "exc_saved": "Välistused salvestatud.",
   "exc_help": "Üks muster või tee rea kohta.\nMustrites saab kasutada * (nt *.tmp).",
-  "save": "Salvesta"
+  "save": "Salvesta",
+  "sys_targets": "Süsteemi sihtmärgid",
+  "syst_title": "Süsteemi sihtmärgid",
+  "syst_help": "Riskantsed sihtmärgid (Prügikast, DNS, Windows Update) kustutavad päris andmeid.\nNeed on vaikimisi VÄLJAS. Ohutud sihtmärgid jäävad SISSE.",
+  "syst_saved": "Süsteemi sihtmärgid salvestatud."
 }

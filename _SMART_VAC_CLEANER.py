@@ -58,7 +58,7 @@ import customtkinter as ctk
 
 
 
-VERSION = "2.5.2"
+VERSION = "2.6.0"
 
 DEFAULT_THREADS = 12
 
@@ -97,6 +97,10 @@ DEFAULT_STRINGS: dict[str, str] = {
     "exc_saved": "Exclusions saved.",
     "exc_help": "One pattern or path per line.\nPatterns use * wildcards (e.g. *.tmp).",
     "save": "Save",
+    "sys_targets": "System Targets",
+    "syst_title": "System Targets",
+    "syst_help": "Risky targets (Recycle Bin, DNS, Windows Update) delete real data.\nThey stay OFF by default. Safe targets stay ON.",
+    "syst_saved": "System targets saved.",
 }
 
 
@@ -2710,6 +2714,7 @@ class App(ctk.CTk):
         self.progress = ProgressTracker()
         self.log_queue = queue.Queue()
         self.cancel_event = threading.Event()
+        self.sys_targets = dict(SYSTEM_TARGET_DEFAULTS)
         self._clean_in_progress = False
         self._clean_timer = None
         self._bg_proc = None
@@ -2750,6 +2755,9 @@ class App(ctk.CTk):
         row += 1
         self.btn_exc = ctk.CTkButton(side, text=self.T["exclusions"], font=native_font, fg_color=WIN95_BUTTON, hover_color=WIN95_BUTTON_HOVER, text_color=WIN95_ACCENT, corner_radius=Z, border_width=2, border_color=BEVEL_RAISED, command=self._open_exclusions)
         self.btn_exc.grid(row=row, column=0, pady=4, padx=10, sticky="ew")
+        row += 1
+        self.btn_syst = ctk.CTkButton(side, text=self.T["sys_targets"], font=native_font, fg_color=WIN95_BUTTON, hover_color=WIN95_BUTTON_HOVER, text_color=WIN95_ACCENT, corner_radius=Z, border_width=2, border_color=BEVEL_RAISED, command=self._open_system_targets)
+        self.btn_syst.grid(row=row, column=0, pady=4, padx=10, sticky="ew")
         self.main_frame = ctk.CTkFrame(self, fg_color=WIN95_BG, corner_radius=Z)
         self.main_frame.grid(row=0, column=1, sticky="nsew", padx=(4,4), pady=4)
         self.main_frame.grid_columnconfigure(0, weight=1)
@@ -2827,8 +2835,9 @@ class App(ctk.CTk):
     def _run_job(self):
         try:
             log = Logger(BASE_DIR/"logs"/f"clean_{datetime.now().astimezone():%Y%m%d_%H%M%S}.log", False, gui_callback=self._log)
-            # Safe defaults: risky opt-in targets stay off unless explicitly enabled (P1-7).
-            all_targets = dict(SYSTEM_TARGET_DEFAULTS)
+            # Safe defaults: risky opt-in targets stay off unless the user
+            # enabled them via the System Targets dialog (P1-7).
+            all_targets = dict(self.sys_targets)
             run_cleaning_job(False, True, True, True, log, DEFAULT_THREADS, all_targets, self.cancel_event, progress=self.progress, exclude_patterns=self.config.get('exclude_patterns'), exclude_paths=self.config.get('exclude_paths'))
         except CancelJobException:
             self._log(self.T["cancelled"])
@@ -3059,6 +3068,41 @@ class App(ctk.CTk):
         save_config(self.config)
         win.destroy()
         self._log(self.T["exc_saved"])
+
+    def _open_system_targets(self):
+        win = ctk.CTkToplevel(self)
+        win.title(self.T["syst_title"])
+        win.geometry("480x420")
+        win.minsize(400, 320)
+        win.configure(fg_color=WIN95_BG)
+        win.transient(self)
+        win.grab_set()
+        win.grid_columnconfigure(0, weight=1)
+        win.grid_rowconfigure(3, weight=1)
+
+        ctk.CTkLabel(win, text=self.T["syst_help"], font=native_font, text_color=WIN95_TEXT_DIM, anchor='w', justify='left').grid(row=0, column=0, sticky='ew', padx=10, pady=(10, 6))
+
+        self.syst_vars = {}
+        for i, name in enumerate(SYSTEM_TARGET_DEFAULTS):
+            var = ctk.BooleanVar(value=bool(self.sys_targets.get(name, False)))
+            self.syst_vars[name] = var
+            cb = ctk.CTkCheckBox(win, text=name, variable=var, font=native_font,
+                                 text_color=WIN95_TEXT, hover_color=WIN95_BUTTON_HOVER,
+                                 fg_color=WIN95_BUTTON, border_color=BEVEL_SUNKEN,
+                                 corner_radius=Z, border_width=2, checkbox_width=20, checkbox_height=20,
+                                 checkmark_color=WIN95_GOLD)
+            cb.grid(row=i + 1, column=0, sticky='w', padx=16, pady=4)
+
+        bar = ctk.CTkFrame(win, fg_color='transparent', corner_radius=Z)
+        bar.grid(row=len(SYSTEM_TARGET_DEFAULTS) + 1, column=0, sticky='ew', padx=10, pady=(4, 10))
+        bar.grid_columnconfigure(0, weight=1)
+        ctk.CTkButton(bar, text=self.T["save"], width=110, font=native_font, fg_color=WIN95_BUTTON, hover_color=WIN95_BUTTON_HOVER, text_color=WIN95_GOLD, corner_radius=Z, border_width=2, border_color=BEVEL_RAISED, command=lambda: self._save_system_targets(win)).grid(row=0, column=0, sticky='w')
+
+    def _save_system_targets(self, win):
+        for name, var in self.syst_vars.items():
+            self.sys_targets[name] = bool(var.get())
+        win.destroy()
+        self._log(self.T["syst_saved"])
 
 
 def _get_pythonw() -> str:

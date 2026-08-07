@@ -1,5 +1,8 @@
 # Changelog
 
+## v2.6.0
+- **GUI opt-in for risky system targets (T-105)**: new *System Targets* dialog — per-target checkboxes let a GUI user explicitly enable Recycle Bin / DNS cache / Windows Update cache purge, the same opt-in CLI `--sys-targets` provides. Risky targets stay OFF by default and `--all` / scheduled / background behavior is unchanged; the opt-in is session-scoped (persistence is a separate planned change). i18n keys for all four locales (en/ru/et/ded). 162 tests green, ruff clean.
+
 ## v2.5.2
 - docs: fixed broken screenshot link in `README.ru.md` / `README.et.md` (`../assets/` → `assets/`); wiki payload refreshed and collected (6 pages, invariants green).
 
