@@ -1,5 +1,8 @@
 # Changelog
 
+## v2.5.2
+- docs: fixed broken screenshot link in `README.ru.md` / `README.et.md` (`../assets/` → `assets/`); wiki payload refreshed and collected (6 pages, invariants green).
+
 ## v2.5.1
 - test: `test_old_opera_versions_keep_latest` made environment-independent — it no longer depends on whether Opera happens to be running on the host (the safety gate correctly skips when it is); regression is now deterministic. 159 tests green, ruff clean.
 

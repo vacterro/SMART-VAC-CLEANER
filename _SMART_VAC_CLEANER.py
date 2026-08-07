@@ -58,7 +58,7 @@ import customtkinter as ctk
 
 
 
-VERSION = "2.5.1"
+VERSION = "2.5.2"
 
 DEFAULT_THREADS = 12
 
