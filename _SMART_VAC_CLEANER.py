@@ -58,7 +58,7 @@ import customtkinter as ctk
 
 
 
-VERSION = "2.6.0"
+VERSION = "2.6.1"
 
 DEFAULT_THREADS = 12
 
@@ -2989,7 +2989,7 @@ class App(ctk.CTk):
             hh, mm = start.split(":")
             if not (0 <= int(hh) < 24 and 0 <= int(mm) < 60):
                 return
-            install_task(f"{int(hh):02d}:{int(mm):02d}")
+            install_task(f"{int(hh):02d}:{int(mm):02d}", enabled_risky_targets(self.sys_targets))
         except Exception as e:
             logging.getLogger("vac_cleaner").warning(f"Failed to install scheduled task: {e}")
 
@@ -3002,7 +3002,7 @@ class App(ctk.CTk):
             flags |= getattr(subprocess, f, 0)
         try:
             self._bg_proc = subprocess.Popen(
-                background_clean_argv(),
+                background_clean_argv(enabled_risky_targets(self.sys_targets)),
                 cwd=str(BASE_DIR),
                 close_fds=True,
                 creationflags=flags,
@@ -3126,34 +3126,51 @@ def _hide_console():
 TASK_NAME = "SmartVACCleaner"
 
 
-def clean_argv() -> list[str]:
+def enabled_risky_targets(sys_targets) -> list[str]:
+    """Risky opt-in targets currently enabled beyond the safe defaults.
+
+    Safe targets (on by default) are already carried by --all; only the risky
+    opt-ins (Recycle Bin / DNS / Windows Update) need an explicit --sys-targets
+    in scheduled/background argv (T-106).
+    """
+    return [name for name, val in (sys_targets or {}).items()
+            if val and not SYSTEM_TARGET_DEFAULTS.get(name)]
+
+
+def clean_argv(sys_targets=None) -> list[str]:
     """Canonical argv for a silent full-clean (scheduled + background share this, T-067).
 
     --all here means portable+system+custom with SAFE system-target defaults;
     the risky opt-in targets (Recycle Bin, DNS, Windows Update) stay off unless
-    enabled explicitly via --sys-targets.
+    enabled explicitly via --sys-targets. `sys_targets` is a list of target
+    names to enable (T-106): only risky opt-ins make sense to pass, since the
+    safe defaults are already on via --all.
     """
     if getattr(sys, "frozen", False):
-        return [sys.executable, "--cli", "--all", "--delete", "--hidden"]
-    return [_get_pythonw(), str(SCRIPT_PATH), "--cli", "--all", "--delete", "--hidden"]
+        argv = [sys.executable, "--cli", "--all", "--delete", "--hidden"]
+    else:
+        argv = [_get_pythonw(), str(SCRIPT_PATH), "--cli", "--all", "--delete", "--hidden"]
+    if sys_targets:
+        argv += ["--sys-targets", ",".join(sys_targets)]
+    return argv
 
 
-def scheduled_task_command() -> str:
+def scheduled_task_command(sys_targets=None) -> str:
     """Command line for the scheduled silent full-clean task."""
-    return subprocess.list2cmdline(clean_argv())
+    return subprocess.list2cmdline(clean_argv(sys_targets))
 
 
-def background_clean_argv() -> list[str]:
+def background_clean_argv(sys_targets=None) -> list[str]:
     """Argv for a detached silent background full-clean (no console, no GUI)."""
-    return clean_argv()
+    return clean_argv(sys_targets)
 
 
-def install_task(time_str: str) -> bool:
+def install_task(time_str: str, sys_targets=None) -> bool:
     """Register daily silent full-clean task in Windows Task Scheduler.
 
     Returns True on success so callers can propagate a nonzero CLI outcome.
     """
-    tr = scheduled_task_command()
+    tr = scheduled_task_command(sys_targets)
     result = subprocess.run(
         ['schtasks', '/create',
          '/tn', TASK_NAME,
@@ -3195,7 +3212,12 @@ def main():
 
     # ── install-task ──────────────────────────────────────────────────────────
     if args.install_task:
-        sys.exit(0 if install_task(args.time) else 1)
+        targets = [t.strip() for t in args.sys_targets.split(",") if t.strip()]
+        for t in targets:
+            if t not in SYSTEM_TARGET_DEFAULTS:
+                print(f"Error: unknown system target '{t}'. Known: {', '.join(SYSTEM_TARGET_DEFAULTS)}")
+                sys.exit(2)
+        sys.exit(0 if install_task(args.time, targets or None) else 1)
 
     # ── status ────────────────────────────────────────────────────────────────
     if args.status:

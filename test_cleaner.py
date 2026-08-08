@@ -1526,6 +1526,86 @@ class TestCLISemantics(unittest.TestCase):
         # list2cmdline quoting round-trips back to the argv
         self.assertEqual(vac.subprocess.list2cmdline(argv), cmd)
 
+    def test_clean_argv_carries_sys_targets(self):
+        """T-106: scheduled/background argv can carry risky opt-in targets."""
+        argv = vac.clean_argv(["Recycle Bin", "DNS Cache"])
+        self.assertIn("--sys-targets", argv)
+        self.assertIn("Recycle Bin,DNS Cache", argv)
+        self.assertEqual(vac.background_clean_argv(["Recycle Bin"]),
+                         vac.clean_argv(["Recycle Bin"]))
+        cmd = vac.scheduled_task_command(["Windows Update Cache"])
+        self.assertIn("--sys-targets", cmd)
+        self.assertIn("Windows Update Cache", cmd)
+
+    def test_clean_argv_defaults_no_sys_targets(self):
+        """T-106: no sys_targets -> argv identical to the safe default form."""
+        self.assertNotIn("--sys-targets", vac.clean_argv())
+        self.assertNotIn("--sys-targets", vac.background_clean_argv())
+        self.assertNotIn("--sys-targets", vac.scheduled_task_command())
+
+    def test_enabled_risky_targets_helper(self):
+        """T-106: only risky opt-ins beyond the safe defaults pass through."""
+        st = dict(vac.SYSTEM_TARGET_DEFAULTS)
+        st["Recycle Bin"] = True
+        st["DNS Cache"] = True
+        out = vac.enabled_risky_targets(st)
+        self.assertIn("Recycle Bin", out)
+        self.assertIn("DNS Cache", out)
+        self.assertNotIn("System Temp", out)  # safe default, --all already carries it
+        self.assertEqual(vac.enabled_risky_targets(dict(vac.SYSTEM_TARGET_DEFAULTS)), [])
+        self.assertEqual(vac.enabled_risky_targets(None), [])
+
+    def test_install_task_passes_sys_targets(self):
+        """T-106: install_task embeds --sys-targets in the schtasks /tr command."""
+        with patch.object(vac.subprocess, "run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stderr="")
+            ok = vac.install_task("09:00", ["Recycle Bin"])
+        self.assertTrue(ok)
+        argv = mock_run.call_args.args[0]
+        self.assertIn("/tr", argv)
+        tr_idx = argv.index("/tr")
+        self.assertIn("--sys-targets", argv[tr_idx + 1])
+        self.assertIn("Recycle Bin", argv[tr_idx + 1])
+
+    def test_install_task_defaults_safe(self):
+        """T-106: no targets -> scheduled command stays the safe --all form."""
+        with patch.object(vac.subprocess, "run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stderr="")
+            ok = vac.install_task("09:00")
+        self.assertTrue(ok)
+        argv = mock_run.call_args.args[0]
+        tr_idx = argv.index("/tr")
+        self.assertNotIn("--sys-targets", argv[tr_idx + 1])
+
+    @patch("_SMART_VAC_CLEANER.argparse.ArgumentParser.parse_args")
+    def test_main_install_task_accepts_sys_targets(self, mock_parse):
+        """T-106: main() routes --sys-targets into install_task for the schedule."""
+        mock_parse.return_value = MagicMock(
+            install_task=True, time="09:00", sys_targets="Recycle Bin,DNS Cache",
+            status=False, analyze_caches=False, hidden=False, dry_run=False,
+            delete=False, portable=False, system=False, custom=False,
+            all=False, cli=False, exclude="")
+        with patch.object(vac, "install_task", return_value=True) as mock_install, \
+             self.assertRaises(SystemExit) as cm:
+            vac.main()
+        self.assertEqual(mock_install.call_args.args[0], "09:00")
+        self.assertEqual(mock_install.call_args.args[1], ["Recycle Bin", "DNS Cache"])
+        self.assertEqual(cm.exception.code, 0)
+
+    @patch("_SMART_VAC_CLEANER.argparse.ArgumentParser.parse_args")
+    def test_main_install_task_rejects_unknown_target(self, mock_parse):
+        """T-106: unknown target in --install-task --sys-targets exits 2."""
+        mock_parse.return_value = MagicMock(
+            install_task=True, time="09:00", sys_targets="Bogus",
+            status=False, analyze_caches=False, hidden=False, dry_run=False,
+            delete=False, portable=False, system=False, custom=False,
+            all=False, cli=False, exclude="")
+        with patch.object(vac, "install_task") as mock_install, \
+             self.assertRaises(SystemExit) as cm:
+            vac.main()
+        mock_install.assert_not_called()
+        self.assertEqual(cm.exception.code, 2)
+
 
 class TestGuiThreadBoundary(unittest.TestCase):
     """T-093/094: worker/timer/tray threads never call Tk; shutdown waits for the worker."""
