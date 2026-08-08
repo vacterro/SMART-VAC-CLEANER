@@ -1,5 +1,8 @@
 # Changelog
 
+## v2.6.2
+- **GUI Preview mode (T-107)**: new *Preview* button in the sidebar runs a physically read-only dry-run and shows exactly what would be deleted — sizes, categories, total "Would free" — before you commit to a real clean. No confirm dialog, zero filesystem mutation; the dry-run engine is the same read-only plan/apply machinery (T-090). i18n key added for all four locales (en/ru/et/ded). 172 tests green, ruff clean.
+
 ## v2.6.1
 - **Scheduled/background target customization (T-106)**: the scheduled task and "Run in background" now carry the GUI's risky opt-in system targets — if you enabled Recycle Bin / DNS / Windows Update in the System Targets dialog, the scheduled run and background clean apply them too. New `--sys-targets` support on `--install-task` (unknown targets exit 2). `--all` and the default no-target forms are byte-identical to before (safe defaults only). 169 tests green, ruff clean.
 

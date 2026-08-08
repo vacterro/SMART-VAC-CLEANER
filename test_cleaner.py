@@ -1617,6 +1617,9 @@ class TestGuiThreadBoundary(unittest.TestCase):
         def insert(self, *a, **k):
             return None
 
+        def delete(self, *a, **k):
+            return None
+
         def see(self, *a, **k):
             return None
 
@@ -1641,6 +1644,9 @@ class TestGuiThreadBoundary(unittest.TestCase):
         app.dash_bar = TestGuiThreadBoundary._Stub()
         app.dash_cat_container = TestGuiThreadBoundary._Stub()
         app.dash_cat_widgets = {}
+        app.btn_clean = TestGuiThreadBoundary._Stub()
+        app.btn_preview = TestGuiThreadBoundary._Stub()
+        app.btn_stop = TestGuiThreadBoundary._Stub()
         app.T = {"cancelled": "cancelled"}
         if after_mode == "boom":
             def boom(*a, **k):
@@ -1849,6 +1855,52 @@ class TestGuiSystemTargets(unittest.TestCase):
         self.assertFalse(captured["sys_targets"]["Recycle Bin"])
         self.assertFalse(captured["sys_targets"]["DNS Cache"])
         self.assertFalse(captured["sys_targets"]["Windows Update Cache"])
+
+
+class TestGuiPreview(unittest.TestCase):
+    """T-107: GUI Preview = read-only dry-run; real Clean stays delete mode."""
+
+    def _app(self):
+        return TestGuiThreadBoundary._fake_app(None)
+
+    def test_run_job_defaults_real_delete(self):
+        """The Clean path must stay a real delete -- dry_run default False."""
+        app = self._app()
+        captured = {}
+        def fake_job(dry_run, run_portable, run_system, run_custom, log, max_threads, sys_targets, cancel_event=None, exclude_patterns=None, exclude_paths=None, progress=None):
+            captured["dry_run"] = dry_run
+        with patch.object(vac, "run_cleaning_job", side_effect=fake_job), \
+             patch.object(vac, "Logger"):
+            app._run_job()
+        self.assertFalse(captured["dry_run"])
+
+    def test_run_job_preview_is_dry_run(self):
+        """Preview passes dry_run=True -- physically read-only (T-090)."""
+        app = self._app()
+        captured = {}
+        def fake_job(dry_run, run_portable, run_system, run_custom, log, max_threads, sys_targets, cancel_event=None, exclude_patterns=None, exclude_paths=None, progress=None):
+            captured["dry_run"] = dry_run
+        with patch.object(vac, "run_cleaning_job", side_effect=fake_job), \
+             patch.object(vac, "Logger"):
+            app._run_job(dry_run=True)
+        self.assertTrue(captured["dry_run"])
+
+    def test_start_preview_no_confirm_spawns_dry_run_worker(self):
+        """Preview must not ask for delete confirmation and must run dry-run."""
+        app = self._app()
+        calls = []
+        def fake_job(dry_run, run_portable, run_system, run_custom, log, max_threads, sys_targets, cancel_event=None, exclude_patterns=None, exclude_paths=None, progress=None):
+            calls.append(dry_run)
+        def boom_confirm(*a, **k):
+            raise AssertionError("preview must not ask for delete confirmation")
+        with patch.object(vac, "run_cleaning_job", side_effect=fake_job), \
+             patch.object(vac, "Logger"), \
+             patch.object(vac.messagebox, "askyesno", side_effect=boom_confirm):
+            app._start_preview()
+        self.assertIsNotNone(app._worker_thread)
+        app._worker_thread.join(timeout=10)
+        self.assertEqual(calls, [True])
+        self.assertTrue(app._job_done_event.is_set())
 
 
 class TestI18nSymmetry(unittest.TestCase):

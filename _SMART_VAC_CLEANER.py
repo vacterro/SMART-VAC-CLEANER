@@ -58,7 +58,7 @@ import customtkinter as ctk
 
 
 
-VERSION = "2.6.1"
+VERSION = "2.6.2"
 
 DEFAULT_THREADS = 12
 
@@ -76,6 +76,7 @@ STRINGS_DIR = BASE_DIR / "strings"
 
 DEFAULT_STRINGS: dict[str, str] = {
     "clean": "Clean",
+    "preview": "Preview",
     "stop": "Stop",
     "install_task": "Install Auto-Clean Task",
     "run_bg": "Run in bg",
@@ -2747,6 +2748,10 @@ class App(ctk.CTk):
         self.btn_stop.grid(row=row, column=0, pady=4, padx=10, sticky="ew")
 
         row += 1
+        self.btn_preview = ctk.CTkButton(side, text=self.T["preview"], font=native_font, fg_color=WIN95_BUTTON, hover_color=WIN95_BUTTON_HOVER, text_color=WIN95_ACCENT, corner_radius=Z, border_width=2, border_color=BEVEL_RAISED, command=self._start_preview)
+        self.btn_preview.grid(row=row, column=0, pady=4, padx=10, sticky="ew")
+
+        row += 1
         self.btn_task = ctk.CTkButton(side, text=self.T["install_task"], font=native_font, fg_color=WIN95_BUTTON, hover_color=WIN95_BUTTON_HOVER, text_color=WIN95_ACCENT, corner_radius=Z, border_width=2, border_color=BEVEL_RAISED, command=self._install_scheduled_task)
         self.btn_task.grid(row=row, column=0, pady=4, padx=10, sticky="ew")
         row += 1
@@ -2788,6 +2793,7 @@ class App(ctk.CTk):
         self._persist_window_geometry()
         self._close_pending = True
         self.btn_clean.configure(state="disabled")
+        self.btn_preview.configure(state="disabled")
         self.btn_stop.configure(state="disabled")
         if self._worker_thread is None or not self._worker_thread.is_alive():
             self._full_exit_impl()
@@ -2832,13 +2838,34 @@ class App(ctk.CTk):
         self._worker_thread = threading.Thread(target=self._run_job, daemon=True)
         self._worker_thread.start()
 
-    def _run_job(self):
+    def _start_preview(self):
+        # T-107: read-only dry-run -- shows the candidate list, deletes nothing.
+        # dry_run=True is physically read-only (T-090 plan/apply separation), so
+        # no confirm dialog is needed or shown here.
+        if self._clean_in_progress: return
+        if self._close_pending: return
+        self._rebuild_cat_bars()
+        self._reset_dashboard()
+        self._clean_in_progress = True
+        self.cancel_event.clear()
+        self.btn_clean.configure(state="disabled")
+        self.btn_preview.configure(state="disabled")
+        self.btn_stop.configure(state="normal")
+        self.text_log.configure(state="normal")
+        self.text_log.delete("1.0", "end")
+        self.text_log.configure(state="disabled")
+        self.progress = ProgressTracker()
+        self._job_done_event.clear()
+        self._worker_thread = threading.Thread(target=self._run_job, kwargs={"dry_run": True}, daemon=True)
+        self._worker_thread.start()
+
+    def _run_job(self, dry_run=False):
         try:
-            log = Logger(BASE_DIR/"logs"/f"clean_{datetime.now().astimezone():%Y%m%d_%H%M%S}.log", False, gui_callback=self._log)
+            log = Logger(BASE_DIR/"logs"/f"clean_{datetime.now().astimezone():%Y%m%d_%H%M%S}.log", dry_run, gui_callback=self._log)
             # Safe defaults: risky opt-in targets stay off unless the user
             # enabled them via the System Targets dialog (P1-7).
             all_targets = dict(self.sys_targets)
-            run_cleaning_job(False, True, True, True, log, DEFAULT_THREADS, all_targets, self.cancel_event, progress=self.progress, exclude_patterns=self.config.get('exclude_patterns'), exclude_paths=self.config.get('exclude_paths'))
+            run_cleaning_job(dry_run, True, True, True, log, DEFAULT_THREADS, all_targets, self.cancel_event, progress=self.progress, exclude_patterns=self.config.get('exclude_patterns'), exclude_paths=self.config.get('exclude_paths'))
         except CancelJobException:
             self._log(self.T["cancelled"])
         except Exception as e:
@@ -2852,6 +2879,7 @@ class App(ctk.CTk):
         self._worker_thread = None
         # Keep the final dashboard snapshot visible instead of wiping it (P2-16).
         self.btn_clean.configure(state="normal")
+        self.btn_preview.configure(state="normal")
         self.btn_stop.configure(state="disabled")
         self._schedule_auto_clean()
 

@@ -1,5 +1,6 @@
 {
   "clean": "Puhasta",
+  "preview": "Eelvaade",
   "stop": "Peata",
   "install_task": "Paigalda autopuhastuse ülesanne",
   "run_bg": "Käivita taustal",
