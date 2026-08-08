@@ -1,5 +1,8 @@
 # Changelog
 
+## v2.6.3
+- **Persistent per-target preferences (T-108)**: the System Targets dialog now saves your choices to the config file (`system_targets` key), so your opt-in for Recycle Bin / DNS / Windows Update survives restarts. Unknown target names in a hand-edited config are rejected on load; safe defaults are unchanged. The plain CLI path keeps the P1-7 guarantee -- `--all` never enables risky targets silently; persisted opt-ins reach scheduled/background runs through the explicit `--sys-targets` embedded in the task (v2.6.1). 179 tests green, ruff clean.
+
 ## v2.6.2
 - **GUI Preview mode (T-107)**: new *Preview* button in the sidebar runs a physically read-only dry-run and shows exactly what would be deleted — sizes, categories, total "Would free" — before you commit to a real clean. No confirm dialog, zero filesystem mutation; the dry-run engine is the same read-only plan/apply machinery (T-090). i18n key added for all four locales (en/ru/et/ded). 172 tests green, ruff clean.
 

@@ -1903,6 +1903,97 @@ class TestGuiPreview(unittest.TestCase):
         self.assertTrue(app._job_done_event.is_set())
 
 
+class TestPersistentSystemTargets(unittest.TestCase):
+    """T-108: system_targets config key persists per-target preferences."""
+
+    def setUp(self):
+        self.tmp_dir = tempfile.TemporaryDirectory()
+        self.tmp_config = Path(self.tmp_dir.name) / "cleaner_config.json"
+        self.cm = patch.object(vac, "CONFIG_FILE", self.tmp_config)
+        self.cm.start()
+
+    def tearDown(self):
+        self.cm.stop()
+        self.tmp_dir.cleanup()
+
+    def test_config_system_targets_roundtrip(self):
+        data = {"system_targets": {"Recycle Bin": True, "System Temp": False}}
+        vac.save_config(data)
+        loaded = vac.load_config()
+        self.assertTrue(loaded["system_targets"]["Recycle Bin"])
+        self.assertFalse(loaded["system_targets"]["System Temp"])
+
+    def test_unknown_target_rejected(self):
+        self.tmp_config.write_text(
+            '{"system_targets": {"Bogus": true, "DNS Cache": true}}',
+            encoding="utf-8")
+        loaded = vac.load_config()
+        self.assertNotIn("Bogus", loaded["system_targets"])
+        self.assertTrue(loaded["system_targets"]["DNS Cache"])
+
+    def test_merged_system_targets_defaults(self):
+        self.assertEqual(vac.merged_system_targets(None), vac.SYSTEM_TARGET_DEFAULTS)
+        self.assertEqual(vac.merged_system_targets({}), vac.SYSTEM_TARGET_DEFAULTS)
+
+    def test_merged_system_targets_applies_known_only(self):
+        out = vac.merged_system_targets({"Recycle Bin": True, "Bogus": True})
+        self.assertTrue(out["Recycle Bin"])
+        self.assertNotIn("Bogus", out)
+        self.assertFalse(out["DNS Cache"])
+
+    def test_gui_init_honors_config(self):
+        """App session starts from persisted preferences, not bare defaults."""
+        self.tmp_config.write_text(
+            '{"system_targets": {"Recycle Bin": true}}', encoding="utf-8")
+        app = TestGuiThreadBoundary._fake_app(None)
+        app.config = vac.load_config()
+        app.sys_targets = vac.merged_system_targets(app.config.get("system_targets"))
+        self.assertTrue(app.sys_targets["Recycle Bin"])
+        self.assertFalse(app.sys_targets["DNS Cache"])
+
+    def test_save_system_targets_persists_to_config(self):
+        """The dialog save writes system_targets back to the config file."""
+        self.tmp_config.write_text('{"system_targets": {}}', encoding="utf-8")
+        app = TestGuiThreadBoundary._fake_app(None)
+        app.config = vac.load_config()
+        app.sys_targets = vac.merged_system_targets(app.config.get("system_targets"))
+        def var_get(value):
+            return lambda self: value
+        app.syst_vars = {
+            "Recycle Bin": type("V", (), {"get": var_get(True)})(),
+            "DNS Cache": type("V", (), {"get": var_get(False)})(),
+            "System Temp": type("V", (), {"get": var_get(True)})(),
+        }
+        win = type("W", (), {"destroy": lambda self: None})()
+        app.T = {"syst_saved": "saved"}
+        app._save_system_targets(win)
+        loaded = vac.load_config()
+        self.assertTrue(loaded["system_targets"]["Recycle Bin"])
+        self.assertFalse(loaded["system_targets"]["DNS Cache"])
+
+    def test_cli_all_keeps_p1_7_safe_defaults(self):
+        """T-108/P1-7: config risky prefs reach the clean path only via the
+        GUI state that builds scheduled/background argv -- never silently from
+        config in the plain CLI --all path."""
+        self.tmp_config.write_text(
+            '{"system_targets": {"Recycle Bin": true}}', encoding="utf-8")
+        captured = {}
+        def fake_job(dry_run, run_portable, run_system, run_custom, log, max_threads, sys_targets, cancel_event=None, exclude_patterns=None, exclude_paths=None, progress=None):
+            captured["sys_targets"] = sys_targets
+        with patch.object(vac.argparse.ArgumentParser, "parse_args",
+                          return_value=MagicMock(
+                              install_task=False, time="09:00", sys_targets="",
+                              status=False, analyze_caches=False, hidden=True,
+                              dry_run=False, delete=True, portable=False,
+                              system=False, custom=False, all=True, cli=True,
+                              exclude="")), \
+             patch.object(vac, "run_cleaning_job", side_effect=fake_job), \
+             patch.object(vac, "Logger"):
+            vac.main()
+        self.assertFalse(captured["sys_targets"]["Recycle Bin"])
+        self.assertFalse(captured["sys_targets"]["DNS Cache"])
+
+
 class TestI18nSymmetry(unittest.TestCase):
     """i18n key-set guards (no fixture patching — reads real strings dir)."""
 

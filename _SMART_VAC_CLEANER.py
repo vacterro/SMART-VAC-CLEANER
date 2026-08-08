@@ -58,7 +58,7 @@ import customtkinter as ctk
 
 
 
-VERSION = "2.6.2"
+VERSION = "2.6.3"
 
 DEFAULT_THREADS = 12
 
@@ -2446,7 +2446,9 @@ def load_config() -> dict:
 
         "window_geometry": "",
 
-        "portable_roots": []
+        "portable_roots": [],
+
+        "system_targets": {}
 
     }
 
@@ -2519,6 +2521,22 @@ def load_config() -> dict:
             data["custom_rules"] = rules
 
             data["exclude_paths"] = [str(p) for p in (normalize_path(ep) for ep in data.get("exclude_paths", [])) if p is not None]
+
+            raw_st = data.get("system_targets")
+
+            if not isinstance(raw_st, dict):
+
+                raw_st = {}
+
+                data["system_targets"] = {}
+
+            for name in raw_st:
+
+                if name not in SYSTEM_TARGET_DEFAULTS:
+
+                    logging.getLogger("vac_cleaner").warning(f"Unknown system target in config dropped: {name}")
+
+            data["system_targets"] = {k: bool(v) for k, v in raw_st.items() if k in SYSTEM_TARGET_DEFAULTS}
 
             return data
 
@@ -2604,6 +2622,21 @@ SYSTEM_TARGET_DEFAULTS = {
     'Windows Update Cache': False, 'DNS Cache': False, 'Recycle Bin': False,
     'Deep C: Junk': True,
 }
+
+def merged_system_targets(overrides) -> dict[str, bool]:
+    """Persisted per-target preferences (T-108) over the safe defaults.
+
+    Only declared SYSTEM_TARGET_DEFAULTS names are honored; unknown names are
+    rejected (dropped). Used by the GUI session state, which is also what the
+    scheduled-task / background argv is built from (T-106). The plain CLI clean
+    path intentionally keeps the safe defaults -- risky opt-ins reach it only
+    through an explicit --sys-targets (P1-7).
+    """
+    out = dict(SYSTEM_TARGET_DEFAULTS)
+    for name, val in (overrides or {}).items():
+        if name in SYSTEM_TARGET_DEFAULTS:
+            out[name] = bool(val)
+    return out
 
 def calculate_target_sizes(targets):
     result = {}
@@ -2715,7 +2748,7 @@ class App(ctk.CTk):
         self.progress = ProgressTracker()
         self.log_queue = queue.Queue()
         self.cancel_event = threading.Event()
-        self.sys_targets = dict(SYSTEM_TARGET_DEFAULTS)
+        self.sys_targets = merged_system_targets(self.config.get("system_targets"))
         self._clean_in_progress = False
         self._clean_timer = None
         self._bg_proc = None
@@ -3129,6 +3162,8 @@ class App(ctk.CTk):
     def _save_system_targets(self, win):
         for name, var in self.syst_vars.items():
             self.sys_targets[name] = bool(var.get())
+        self.config["system_targets"] = dict(self.sys_targets)
+        save_config(self.config)
         win.destroy()
         self._log(self.T["syst_saved"])
 
