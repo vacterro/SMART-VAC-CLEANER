@@ -74,10 +74,13 @@ Produces `dist\SmartVACCleaner.exe` (PyInstaller onefile). On every
 python _SMART_VAC_CLEANER.py
 ```
 
-Five buttons: **Clean** (real delete — asks for confirmation first), **Stop**,
-**Install Auto-Clean Task**, **Run in bg** (starts a detached silent full clean
-in the background), **Exclusions** (edit never-delete patterns and
-paths). Progress bars per category, full log window; every run also lands in
+Seven buttons: **Clean** (real delete — asks for confirmation first), **Stop**,
+**Preview** (a physically read-only dry-run of what would be deleted), **Install
+Auto-Clean Task**, **Run in bg** (starts a detached silent full clean in the
+background), **Exclusions** (edit never-delete patterns and paths), **System
+Targets** (opt into risky targets — Recycle Bin, DNS cache, Windows Update
+cache; persisted in the config). Progress bars per category, full log window;
+every run also lands in
 `logs\clean_*.log`.
 
 ## CLI

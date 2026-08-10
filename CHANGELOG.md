@@ -1,5 +1,8 @@
 # Changelog
 
+## v2.6.4
+- **README/screenshot doc-drift fix (T-109)**: GUI docs updated from "five buttons" to seven -- the sidebar's *Preview* (read-only dry-run, T-107) and *System Targets* (risky-target opt-in, T-105) buttons were missing from the README and its translations. README.md/ru/et/ded rewritten, screenshot regenerated from the live build, translation package refreshed (ee). 179 tests green, ruff clean.
+
 ## v2.6.3
 - **Persistent per-target preferences (T-108)**: the System Targets dialog now saves your choices to the config file (`system_targets` key), so your opt-in for Recycle Bin / DNS / Windows Update survives restarts. Unknown target names in a hand-edited config are rejected on load; safe defaults are unchanged. The plain CLI path keeps the P1-7 guarantee -- `--all` never enables risky targets silently; persisted opt-ins reach scheduled/background runs through the explicit `--sys-targets` embedded in the task (v2.6.1). 179 tests green, ruff clean.
 

@@ -68,10 +68,13 @@ peale ehitab CI exe ja laeb selle artefaktina automaatselt üles.
 python _SMART_VAC_CLEANER.py
 ```
 
-Viis nuppu: **Puhasta** (päris kustutamine — küsib eelnevalt kinnitust),
-**Peata**, **Paigalda autopuhastuse ülesanne**, **Käivita taustal** (käivitab
+Seitse nuppu: **Puhasta** (päris kustutamine — küsib eelnevalt kinnitust),
+**Peata**, **Eelvaade** (täielikult read-only, näitab, mis kustutataks),
+**Paigalda autopuhastuse ülesanne**, **Käivita taustal** (käivitab
 eraldiseisva peidetud täispuhastuse taustal), **Välistused** (ära-kustuta
-mustrite ja teede muutmine). Progressiribad kategooriate kaupa, täielik
+mustrite ja teede muutmine), **Süsteemi sihtmärgid** (riskantsete sihtmärkide
+sisse lülitamine — Prügikast, DNS-i vahemälu, Windows Update'i vahemälu; valik
+salvestatakse konfigi). Progressiribad kategooriate kaupa, täielik
 logiakken; iga käivitus jõuab ka `logs\clean_*.log` faili.
 
 ## CLI
@@ -164,4 +167,4 @@ Töötab võrguühenduseta, puudutab ainult ajutisi katalooge.
 - Tegumihalduri ülesande paigaldamine nõuab administraatori õigusi (`/rl HIGHEST`).
 - Kaasaskantavad juured mittesüsteemsetel ketastel puhastatakse ka ilma adminita (VAC-skeem).
 - Projekt pole seotud ühegi müüjaga; kõik teed on tuntud vahemälu/logikataloogid, mida rakendused taastavad.
-<!-- source-digest: README.md sha256:bb86d5bfbdce58a9 -->
+<!-- source-digest: README.md sha256:a15dfad98946adc2 -->
