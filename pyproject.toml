@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "smart-vac-cleaner"
-version = "2.6.4"
+version = "2.6.5"
 description = "Portable, safe, modern junk cleaner for Windows: system junk, app caches, portable roots, custom rules. GUI + CLI + Task Scheduler."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -30,4 +30,15 @@ dependencies = [
 vac-cleaner = "_SMART_VAC_CLEANER:main"
 
 [tool.setuptools]
-py-modules = ["_SMART_VAC_CLEANER"]
+py-modules = ["_SMART_VAC_CLEANER", "_fs_helpers", "analyze_caches"]
+
+# F6: the installed CLI/GUI must find every runtime module and the locale
+# files. strings/ lands in site-packages/strings next to the modules so
+# STRINGS_DIR (BASE_DIR/strings) resolves for an installed wheel, not only a
+# source checkout.
+[tool.setuptools.data-files]
+"Lib/site-packages/strings" = [
+    "strings/ded.json",
+    "strings/et.json",
+    "strings/ru.json",
+]

@@ -20,7 +20,7 @@ jobs:
 
       - name: Build exe
         run: |
-          python -m PyInstaller --onefile --console --clean --noconfirm --name SmartVACCleaner --collect-data customtkinter _SMART_VAC_CLEANER.py
+          python -m PyInstaller --onefile --console --clean --noconfirm --name SmartVACCleaner --collect-data customtkinter --add-data "strings;strings" _SMART_VAC_CLEANER.py
 
       - name: Smoke test
         run: |

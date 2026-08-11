@@ -5,15 +5,15 @@
 
 """
 
-_SMART_VAC_CLEANER.py  --  v2.1.0
+_SMART_VAC_CLEANER.py
 
 Portable, dependency-free-ish (customtkinter, pystray, Pillow) smart cleaner
 for system junk, app caches, portable-app roots, and user-defined rules.
 
-No hard dependency on any single machine: all candidate portable roots are
-always seeded into the config, but only paths that actually EXIST on the
-current machine get swept and only known junk patterns inside them are
-removed. Missing drives/disks are silently skipped, never errors.
+Portable roots are configured per machine in cleaner_config.json
+(portable_roots). Only roots that actually EXIST on the current machine get
+swept and only known junk patterns inside them are removed. Missing
+drives/disks are silently skipped, never errors.
 
 Defense in depth: blacklist, path-part minimums, running-process checks,
 symlink refusal, never-delete names, exclude lists, dry-run default.
@@ -25,6 +25,7 @@ GUI for interactive use + CLI for automated Task Scheduler execution.
 
 import argparse
 import concurrent.futures
+import copy
 import csv
 import fnmatch
 import json
@@ -58,7 +59,7 @@ import customtkinter as ctk
 
 
 
-VERSION = "2.6.4"
+VERSION = "2.6.5"
 
 DEFAULT_THREADS = 12
 
@@ -125,6 +126,11 @@ def load_strings(lang: str) -> dict[str, str]:
 
 MIN_PATH_PARTS = 5
 
+# F2: bounded STOP_PENDING wait when stopping wuauserv. STOP_PENDING is WAIT,
+# never authorization; only the exact STOPPED state authorizes deletion.
+_WU_STOP_POLL_TIMEOUT = 30.0
+_WU_STOP_POLL_INTERVAL = 0.25
+
 
 APP_PROCESSES: dict[str, set[str]] = {
 
@@ -188,7 +194,7 @@ APP_PROCESSES: dict[str, set[str]] = {
 
     "codenomad": {"codenomad.exe"},
 
-    "devin":    {"devinst.exe"},
+    "devin":    {"devin.exe"},
 
     "calibre":  {"calibre.exe", "calibre-portable.exe"},
 
@@ -252,6 +258,79 @@ APP_PROCESSES: dict[str, set[str]] = {
 
     "general":  set(),
 
+}
+
+# F10: semantic provenance for every APP_PROCESSES group. A mapping is only
+# trusted when it carries evidence here. "verified:disk" = the exe was located
+# on this machine under the owning app's install/data dir (2026-08 audit);
+# "verified:runtimelog" = the process gate fired in real clean logs;
+# "product:exe" = canonical product executable name (app not installed here,
+# name matches the vendor's shipping binary); "unverified-exe" = mapping kept
+# but NOT independently confirmed -- treat with extra suspicion in future
+# audits. Adding a process group without a provenance entry fails the tests.
+APP_PROCESSES_PROVENANCE: dict[str, str] = {
+    "cent": "verified:runtimelog (clean log 2026-07-26: 'cent' running; Chromium engine ships chrome.exe)",
+    "brave": "verified:runtimelog (clean log 2026-07-26: 'brave' running) + verified:disk %LOCALAPPDATA%\\BraveSoftware",
+    "firefox": "product:exe (firefox.exe)",
+    "opera": "product:exe (opera.exe)",
+    "telegram": "product:exe (telegram.exe)",
+    "chrome": "product:exe (chrome.exe)",
+    "edge": "product:exe (msedge.exe)",
+    "discord": "product:exe (discord.exe)",
+    "ollama": "verified:disk %LOCALAPPDATA%\\Programs\\Ollama\\ollama app.exe (2026-08)",
+    "maxonapp": "unverified-exe",
+    "photoshop": "product:exe (photoshop.exe)",
+    "razer": "product:exe (razerappengine.exe)",
+    "epic": "product:exe (epicgameslauncher.exe)",
+    "code": "verified:disk %LOCALAPPDATA%\\Programs\\Microsoft VS Code\\Code.exe (2026-08)",
+    "claude": "verified:disk %LOCALAPPDATA%\\AnthropicClaude\\claude.exe (2026-08)",
+    "bridge": "verified:disk %APPDATA%\\Bridge\\bridge.exe (2026-08)",
+    "qbittorrent": "product:exe (qbittorrent.exe)",
+    "megasync": "product:exe (megasync.exe)",
+    "drivefs": "product:exe (googledrivesync.exe / drivefs.exe)",
+    "obs": "product:exe (obs64.exe / obs32.exe)",
+    "listary": "verified:disk %ProgramFiles%\\Listary\\Listary.exe (2026-08)",
+    "eagle": "verified:disk %ProgramFiles%\\Eagle\\Eagle.exe (2026-08)",
+    "freefilesync": "product:exe (freefilesync.exe / ffs.exe / realtimesync.exe)",
+    "steam": "product:exe (steam.exe)",
+    "docker": "product:exe (docker desktop.exe / docker.exe)",
+    "antigravity": "product:exe (antigravity-x64.exe)",
+    "obsidian": "product:exe (obsidian.exe)",
+    "maxon": "verified:disk %APPDATA%\\Maxon\\maxon.exe (2026-08)",
+    "aichatter": "unverified-exe",
+    "codenomad": "unverified-exe",
+    "devin": "verified:disk %LOCALAPPDATA%\\Programs\\Devin\\Devin.exe (2026-08; corrected from invented devinst.exe)",
+    "calibre": "product:exe (calibre.exe / calibre-portable.exe)",
+    "quiterss": "unverified-exe",
+    "freebuff": "verified:disk %LOCALAPPDATA%\\Programs\\@codebufffreebuff-desktop\\Freebuff.exe (2026-08)",
+    "lmstudio": "verified:disk %LOCALAPPDATA%\\Programs\\LM Studio\\LM Studio.exe (2026-08)",
+    "losslesscut": "unverified-exe",
+    "topaz": "verified:disk %APPDATA%\\Topaz Labs LLC\\topaz photo ai.exe (2026-08)",
+    "bluestacks": "verified:disk %ProgramFiles%\\BlueStacks_nxt\\BlueStacksAI.exe / BlueStacksAIRun.exe / BlueStacksAppplayerWeb.exe (2026-08)",
+    "hdplayer": "verified:disk %ProgramFiles%\\BlueStacks_nxt\\HD-Player.exe (2026-08)",
+    "omniroute": "unverified-exe",
+    "stemstudio": "unverified-exe",
+    "deskchat": "unverified-exe",
+    "dropdead": "unverified-exe",
+    "verifiedskill": "unverified-exe",
+    "borisfx": "product:exe (borisfx.exe / continuum.exe / sapphire.exe)",
+    "betterdiscord": "product:exe (betterdiscord installer.exe / betterdiscord.exe)",
+    "jangafx": "verified:disk %ProgramFiles%\\JangaFX\\LiquiGen\\LiquiGen.exe (2026-08)",
+    "krisp": "verified:disk %APPDATA%\\Krisp\\krisp.exe (2026-08)",
+    "fontbase": "verified:disk %LOCALAPPDATA%\\Programs\\FontBase\\FontBase.exe (2026-08)",
+    "influx": "unverified-exe",
+    "itop": "unverified-exe",
+    "clipstudio": "verified:disk %ProgramFiles%\\CELSYS\\CLIP STUDIO 1.5\\CLIP STUDIO PAINT\\CLIPStudioPaint.exe (2026-08)",
+    "charactercreator": "verified:disk %ProgramFiles%\\Reallusion\\Character Creator 5\\Bin64\\CharacterCreator.exe (2026-08)",
+    "accu rig": "unverified-exe (actorcore.exe / accu rig.exe NOT found on disk 2026-08)",
+    "unreal": "product:exe (unrealenginelauncher.exe)",
+    "siyuan": "verified:disk %APPDATA%\\SiYuan\\siyuan.exe (2026-08)",
+    "viber": "verified:disk %LOCALAPPDATA%\\Viber\\Viber.exe (2026-08)",
+    "yandexdisk": "verified:disk %APPDATA%\\Yandex\\YandexDisk2\\YandexDisk2.exe (2026-08)",
+    "githubcli": "verified:disk %ProgramFiles%\\GitHub CLI\\gh.exe (2026-08)",
+    "mailbird": "product:exe (mailbird.exe / mailbirdportable.exe)",
+    "substance": "product:exe (adobe substance 3d sampler/painter/designer.exe)",
+    "general": "intentional empty group (never blocks)",
 }
 
 
@@ -323,7 +402,10 @@ NUMBERED_COPY_JUNK_BASES = frozenset({
 # SQLite/journal/backup tails that still refer to the protected base name.
 _NAME_TAIL_RE = re.compile(r"-(?:journal|wal|shm|old|bak)$")
 
-_NAME_NUMBERED_RE = re.compile(r"^(.+?) \(\d+\)$")
+# Numbered-copy names 'X (N)'. group(1) = base name, group(2) = copy number.
+# Shared by the never-delete reducer and the portable numbered-copy sweeper
+# (one canonical copy, H).
+_NAME_NUMBERED_RE = re.compile(r"^(.+?) \((\d+)\)$")
 
 
 def _name_variants(name_lower: str) -> list[str]:
@@ -355,8 +437,6 @@ CHROMIUM_PROFILE_DIRS = ["Cache", "Code Cache", "GPUCache", "DawnCache", "DawnGr
 CHROMIUM_SW_SUBDIRS = ["CacheStorage", "ScriptCache"]
 
 CHROMIUM_PROFILE_FILES = ["LOCK", "LOG", "LOG.old"]
-
-CHROMIUM_NETWORK_FILES = []
 
 CHROMIUM_USERDATA_DIRS = ["BrowserMetrics", "Local Traces", "Crashpad", "ShaderCache", "GrShaderCache", "GraphiteDawnCache", "component_crx_cache", "extensions_crx_cache"]
 
@@ -692,11 +772,6 @@ def is_app_running(app_group: str, running: set[str] | None) -> bool:
     return bool(procs & running)
 
 
-def _fs_helper_get_size(path: Path) -> int:
-    from _fs_helpers import get_size as _get_size
-    return _get_size(path)
-
-
 def is_link(path: Path) -> bool:
     """True for symlinks and (on Windows) junctions/reparse points."""
     try:
@@ -710,9 +785,80 @@ def is_link(path: Path) -> bool:
     return False
 
 
-def get_size(path: Path) -> int:
-    """Total byte size of a file or directory tree (iterative, no recursion)."""
-    return _fs_helper_get_size(path)
+# F1: object identity for TOCTOU defence. A path being present at plan time is
+# NOT permission forever -- between planning and mutation the object at that
+# path may be replaced (file swap, dir swap, symlink/junction introduction).
+# Every mutation candidate carries the identity captured during planning, and
+# the mutation chokepoint re-proves the object is still the SAME object.
+def _capture_identity(path: Path) -> dict | None:
+    """Capture a conservative identity for the object at `path` via lstat.
+
+    Returns a dict, or None when the object cannot be identified (missing /
+    unreadable). Symlinks and reparse points get a fixed 'link_or_reparse'
+    identity that never authorizes a mutation. Inode (dev, ino) identity is
+    used when the filesystem provides it; on Windows the file creation time
+    (st_ctime_ns) is a strong replacement detector that our own mutations do
+    not move (chmod/rmdir of empty dirs leave ctime untouched).
+    """
+    try:
+        st = path.lstat()
+    except OSError:
+        return None
+    attrs = int(getattr(st, "st_file_attributes", 0))
+    if stat.S_ISLNK(st.st_mode) or (os.name == "nt" and (attrs & stat.FILE_ATTRIBUTE_REPARSE_POINT)):
+        return {"type": "link_or_reparse"}
+    kind = "dir" if stat.S_ISDIR(st.st_mode) else "file"
+    ident: dict = {"type": kind, "attrs": attrs, "ctime_ns": int(st.st_ctime_ns)}
+    if st.st_ino and st.st_dev:
+        ident["dev"] = int(st.st_dev)
+        ident["ino"] = int(st.st_ino)
+    if kind == "file":
+        ident["size"] = int(st.st_size)
+        ident["mtime_ns"] = int(st.st_mtime_ns)
+    return ident
+
+
+def _identity_matches(planned: dict | None, current: dict | None) -> bool:
+    """True ONLY when `current` provably describes the same object as `planned`.
+
+    Inode identity wins when both sides carry one. If exactly one side has an
+    inode the state is UNCERTAIN -> False (fail closed; never assume path
+    equality means object equality). Without inodes a conservative fingerprint
+    (size + mtime + ctime + attrs) is compared; ANY mismatch refuses. A
+    missing side always refuses.
+    """
+    if not planned or not current:
+        return False
+    if planned.get("type") != current.get("type"):
+        return False
+    if planned.get("type") == "link_or_reparse":
+        return False
+    p_ino, c_ino = planned.get("ino"), current.get("ino")
+    if p_ino and c_ino:
+        return planned.get("dev") == current.get("dev") and p_ino == c_ino
+    if p_ino or c_ino:
+        return False
+    for key in ("size", "mtime_ns", "ctime_ns", "attrs"):
+        if planned.get(key) != current.get(key):
+            return False
+    return True
+
+
+class MutationResult:
+    """Structured outcome of one filesystem mutation (F7).
+
+    `success` is deliberately separate from `bytes_freed`: a successfully
+    deleted empty file is success=True with bytes=0, and a zero result must
+    never be mistaken for a failure (nor a failure for a zero-byte success).
+    `reason` carries the skip/failure cause when success is False.
+    """
+
+    __slots__ = ("bytes_freed", "reason", "success")
+
+    def __init__(self, success: bool, bytes_freed: int = 0, reason: str = ""):
+        self.success = bool(success)
+        self.bytes_freed = int(bytes_freed)
+        self.reason = reason
 
 
 BYTES_PER_MB = 1_048_576
@@ -738,7 +884,7 @@ def fmt(n: int) -> str:
 
 class Logger:
 
-    def __init__(self, log_file: Path | None, dry_run: bool, gui_callback=None):
+    def __init__(self, log_file: Path | None, dry_run: bool, gui_callback=None, quiet: bool = False):
 
         self.dry_run = dry_run
 
@@ -754,6 +900,10 @@ class Logger:
 
         self.gui_callback = gui_callback
 
+        self.quiet = quiet
+
+        self.deleted_paths: list[str] = []  # F4: candidate truth recorder
+
         self.lock = threading.Lock()
 
 
@@ -768,16 +918,24 @@ class Logger:
             self._log.removeHandler(h)
 
 
-        ch = logging.StreamHandler(stream=sys.stdout)
+        if self.quiet:
 
-        ch.setLevel(logging.INFO)
+            # F4: silent collector used by --status / calculate_target_sizes.
+            # Counters still update; nothing is emitted to console or GUI.
+            self._log.addHandler(logging.NullHandler())
 
-        ch.setFormatter(logging.Formatter("%(message)s"))
+        else:
 
-        self._log.addHandler(ch)
+            ch = logging.StreamHandler(stream=sys.stdout)
+
+            ch.setLevel(logging.INFO)
+
+            ch.setFormatter(logging.Formatter("%(message)s"))
+
+            self._log.addHandler(ch)
 
 
-        if log_file:
+        if not self.quiet and log_file:
 
             try:
                 log_file.parent.mkdir(parents=True, exist_ok=True)
@@ -863,6 +1021,8 @@ class Logger:
 
             self.n_deleted += 1
 
+            self.deleted_paths.append(str(path))
+
         tag = "DRY-RUN" if self.dry_run else "DELETED"
 
         mb = size / BYTES_PER_MB
@@ -929,7 +1089,7 @@ class Logger:
 
 class SafetyGuard:
 
-    def __init__(self, base_root: Path, is_system_root: bool = False,
+    def __init__(self, base_root: Path, allow_shallow_system_target: bool = False,
 
                  exclude_patterns: list[str] | None = None,
 
@@ -937,7 +1097,7 @@ class SafetyGuard:
 
         self.base_root = self._canon(base_root)
 
-        self.is_system_root = is_system_root
+        self.allow_shallow_system_target = allow_shallow_system_target
 
         self.exclude_patterns = exclude_patterns or []
 
@@ -974,7 +1134,7 @@ class SafetyGuard:
             return False, "Path IS the target root"
 
 
-        if not self.is_system_root and len(path.parts) < MIN_PATH_PARTS:
+        if not self.allow_shallow_system_target and len(path.parts) < MIN_PATH_PARTS:
 
             return False, f"Path too shallow ({len(path.parts)} components)"
 
@@ -1064,10 +1224,10 @@ class CleanerEngine:
 
         self.running = get_running_processes()
 
-        self.guard = self.make_guard(guard.base_root, guard.is_system_root)
+        self.guard = self.make_guard(guard.base_root, guard.allow_shallow_system_target)
 
 
-    def make_guard(self, root: Path, is_system_root: bool = False) -> SafetyGuard:
+    def make_guard(self, root: Path, allow_shallow_system_target: bool = False) -> SafetyGuard:
 
         """Build a guard that inherits the engine's exclusions (global invariant, P0-3)."""
 
@@ -1075,7 +1235,7 @@ class CleanerEngine:
 
         paths = list(dict.fromkeys(self.exclude_paths or []))
 
-        return SafetyGuard(root, is_system_root=is_system_root, exclude_patterns=pats, exclude_paths=paths)
+        return SafetyGuard(root, allow_shallow_system_target=allow_shallow_system_target, exclude_patterns=pats, exclude_paths=paths)
 
 
     def check_cancel(self):
@@ -1098,10 +1258,11 @@ class CleanerEngine:
 
 
     def _plan_file(self, path: Path):
-        """READ-ONLY file validation + size (T-090: planning never mutates).
+        """READ-ONLY file validation + size + identity (T-090/F1).
 
-        Returns the size in bytes, or None when the path must not be touched.
-        Performs no chmod/unlink/rmdir.
+        Returns (size_bytes, identity) or None when the path must not be
+        touched. Performs no chmod/unlink/rmdir. The identity is what the
+        apply phase re-verifies immediately before mutation (F1 TOCTOU gate).
         """
         if not path.exists():
             return None
@@ -1112,64 +1273,111 @@ class CleanerEngine:
         if not ok:
             self.log.skipped(path, reason)
             return None
+        identity = _capture_identity(path)
+        if not identity or identity.get("type") == "link_or_reparse":
+            self.log.skipped(path, "Object identity could not be established")
+            return None
         try:
-            return path.stat().st_size
+            return int(path.stat().st_size), identity
         except OSError:
-            return 0
+            return 0, identity
 
 
-    def _apply_file_plan(self, path: Path, size: int) -> int:
-        """REAL delete of a single file. Returns bytes freed (0 on failure).
+    def _authorize_mutation(self, path: Path, planned_identity):
+        """THE single just-in-time mutation authorization gate (F1).
+
+        Runs immediately before every chmod/unlink/rmdir on every candidate:
+        1. lstat the path again.
+        2. refuse symlink/reparse/junction.
+        3. re-run the active SafetyGuard.
+        4. verify the object identity still matches the planned identity.
+        Anything missing / changed / uncertain => (False, reason); the caller
+        must SKIP and never mutate. Never chmod before this gate.
+        """
+        try:
+            st = path.lstat()
+        except OSError:
+            return False, "Path missing before mutation"
+        if stat.S_ISLNK(st.st_mode):
+            return False, "Symlink introduced before mutation"
+        attrs = int(getattr(st, "st_file_attributes", 0))
+        if os.name == "nt" and (attrs & stat.FILE_ATTRIBUTE_REPARSE_POINT):
+            return False, "Reparse point introduced before mutation"
+        ok, reason = self.guard.is_safe(path)
+        if not ok:
+            return False, reason
+        current = _capture_identity(path)
+        if not _identity_matches(planned_identity, current):
+            return False, "Object identity changed since planning"
+        return True, "OK"
+
+
+    def _apply_file_plan(self, path: Path, size: int, identity) -> MutationResult:
+        """REAL delete of a single file (F1/F7).
 
         MUTATES the filesystem. MUST be unreachable when dry_run is True.
-        Logs a skip on failure; counters are handled by callers after success.
+        The mutation authorization gate runs immediately before chmod/unlink.
+        Returns a structured MutationResult; success is independent of bytes
+        freed (an empty file is a successful zero-byte delete).
         """
+        ok, reason = self._authorize_mutation(path, identity)
+        if not ok:
+            self.log.skipped(path, reason)
+            return MutationResult(False, 0, reason)
         for attempt in range(2):
+            ok, reason = self._authorize_mutation(path, identity)
+            if not ok:
+                self.log.skipped(path, reason)
+                return MutationResult(False, 0, reason)
             try:
                 path.chmod(0o666)
                 path.unlink()
-                return size
+                return MutationResult(True, size)
             except PermissionError:
                 if attempt == 0:
                     time.sleep(0.01)  # Windows Defender micro-lock backoff
                 else:
                     self.log.skipped(path, "File locked by another process")
-                    return 0
+                    return MutationResult(False, 0, "File locked by another process")
             except Exception:
                 self.log.skipped(path, "File in use or access denied")
-                return 0
-        return 0
+                return MutationResult(False, 0, "File in use or access denied")
+        return MutationResult(False, 0, "File in use or access denied")
 
 
     def _del_file(self, path: Path, desc: str) -> int:
 
-        """Delete one file. Counters/log/progress advance only after verified success (P1-12)."""
+        """Delete one file. Counters/log/progress advance only after verified success (P1-12/F7)."""
 
         self.check_cancel()
 
-        size = self._plan_file(path)
-        if size is None:
+        plan = self._plan_file(path)
+        if plan is None:
             return 0
+
+        size, identity = plan
 
         if self.dry_run:
             self._log_deleted(path, size, desc)
             return size
 
-        freed = self._apply_file_plan(path, size)
-        if freed:
-            self._log_deleted(path, freed, desc)
+        result = self._apply_file_plan(path, size, identity)
+        if result.success:
+            self._log_deleted(path, result.bytes_freed, desc)
             if self.progress:
-                self.progress.advance(freed)
-        return freed
+                self.progress.advance(result.bytes_freed)
+        return result.bytes_freed
 
 
     def _plan_tree(self, path: Path, desc: str):
-        """READ-ONLY discovery of a deletable tree (T-090: planning never mutates).
+        """READ-ONLY discovery of a deletable tree (T-090/F1).
 
-        Validates every node via guard.is_safe, collects deletable files + dirs
-        and their byte totals, records protected nodes. Performs ZERO
-        chmod/unlink/rmdir/write. Returns a plan dict, or None when the root is
-        refused. Cancellation is checked during BOTH discovery phases (T-094).
+        Validates every node via guard.is_safe, collects deletable files + dirs,
+        their byte totals and their captured identities, records protected
+        nodes. Performs ZERO chmod/unlink/rmdir/write. Returns a plan dict, or
+        None when the root is refused. Cancellation is checked during BOTH
+        discovery phases (T-094). The apply phase re-verifies every identity
+        immediately before each mutation (F1).
         """
         if is_link(path):
             self.log.skipped(path, "Symlink/reparse point refused")
@@ -1177,6 +1385,11 @@ class CleanerEngine:
         ok, reason = self.guard.is_safe(path)
         if not ok:
             self.log.skipped(path, reason)
+            return None
+
+        root_identity = _capture_identity(path)
+        if not root_identity or root_identity.get("type") == "link_or_reparse":
+            self.log.skipped(path, "Root identity could not be established")
             return None
 
         protected: set[Path] = set()
@@ -1201,8 +1414,8 @@ class CleanerEngine:
                 protected.add(cur)
 
         # Phase 2: collect files + dirs bottom-up for later deletion.
-        files: list[tuple[Path, int]] = []
-        dirs: list[Path] = []
+        files: list[tuple[Path, int, dict]] = []
+        dirs: list[tuple[Path, dict]] = []
         stack = [path]
         while stack:
             cur = stack.pop()
@@ -1215,50 +1428,74 @@ class CleanerEngine:
                     if entry.is_file(follow_symlinks=False):
                         if e in protected or is_link(e):
                             continue
+                        ident = _capture_identity(e)
+                        if not ident or ident.get("type") == "link_or_reparse":
+                            protected.add(e)
+                            continue
                         try:
-                            files.append((e, e.stat().st_size))
+                            files.append((e, int(e.stat().st_size), ident))
                         except OSError:
-                            files.append((e, 0))
+                            files.append((e, 0, ident))
                     elif entry.is_dir(follow_symlinks=False):
-                        dirs.append(e)
+                        ident = _capture_identity(e)
+                        if not ident or ident.get("type") == "link_or_reparse":
+                            protected.add(e)
+                            continue
+                        dirs.append((e, ident))
                         stack.append(e)
             except OSError:
                 protected.add(cur)
 
-        total = sum(sz for _, sz in files)
+        total = sum(sz for _, sz, _ in files)
         return {"bytes": total, "files": files, "dirs": dirs,
-                "protected": sorted(protected), "root": path}
+                "protected": sorted(protected), "root": path,
+                "root_identity": root_identity}
 
 
     def _apply_tree_plan(self, plan: dict, desc: str) -> tuple[int, bool]:
         """REAL delete of a planned tree. Returns (freed, fully_removed).
 
         MUTATES the filesystem. MUST be unreachable when dry_run is True.
+        Every file, every directory and the root itself passes the mutation
+        authorization gate immediately before its mutation (F1): a replaced /
+        swapped / linked object is SKIPPED, never touched. No ad-hoc checks
+        elsewhere -- this is the single chokepoint.
         """
         freed = 0
         root = plan["root"]
-        for f, sz in sorted(plan["files"], key=lambda x: len(x[0].parts), reverse=True):
+        root_identity = plan["root_identity"]
+        for f, sz, ident in sorted(plan["files"], key=lambda x: len(x[0].parts), reverse=True):
             self.check_cancel()
-            freed += self._apply_file_plan(f, sz)
+            freed += self._apply_file_plan(f, sz, ident).bytes_freed
 
         fully = root not in plan["protected"]
-        for d in sorted(plan["dirs"], key=lambda x: len(x.parts), reverse=True):
-            if d in plan["protected"] or is_link(d):
+        for d, ident in sorted(plan["dirs"], key=lambda x: len(x[0].parts), reverse=True):
+            if d in plan["protected"]:
                 continue
             self.check_cancel()
+            ok, reason = self._authorize_mutation(d, ident)
+            if not ok:
+                self.log.skipped(d, reason)
+                fully = False
+                continue
             try:
                 if not any(d.iterdir()):
                     d.rmdir()
             except OSError:
                 fully = False
         if fully:
-            try:
-                if not any(root.iterdir()):
-                    root.rmdir()
-                else:
-                    fully = False
-            except OSError:
+            ok, reason = self._authorize_mutation(root, root_identity)
+            if not ok:
+                self.log.skipped(root, reason)
                 fully = False
+            else:
+                try:
+                    if not any(root.iterdir()):
+                        root.rmdir()
+                    else:
+                        fully = False
+                except OSError:
+                    fully = False
         return freed, fully
 
 
@@ -1424,9 +1661,7 @@ class CleanerEngine:
 
 class PortableCleaner(CleanerEngine):
 
-    r"""Cleans the V:\ and backup drives portable apps."""
-
-    _NUMBERED_RE = re.compile(r'^(.+) \((\d+)\)$')
+    r"""Cleans configurable portable-app roots (portable_roots in cleaner_config.json)."""
 
 
     def sweep_numbered_copies(self, parent: Path, app: str) -> int:
@@ -1443,7 +1678,7 @@ class PortableCleaner(CleanerEngine):
 
                 self.check_cancel()
 
-                m = self._NUMBERED_RE.match(item.name)
+                m = _NAME_NUMBERED_RE.match(item.name)
 
                 if not m or int(m.group(2)) < 2: continue
 
@@ -1499,8 +1734,6 @@ class PortableCleaner(CleanerEngine):
         net = profile_dir / "Network"
 
         if net.exists():
-
-            for name in CHROMIUM_NETWORK_FILES: freed += self.safe_del_file(net / name, f"[{app}] Net/{name}", app)
 
             try:
 
@@ -1822,12 +2055,22 @@ class SystemCleaner(CleanerEngine):
 
         self.targets = targets if targets is not None else {}
 
+        # F4: per-target planned/freed bytes populated by run_all. This is the
+        # single source of truth shared by dry-run, --status and the GUI
+        # preview/progress estimation (calculate_target_sizes feeds off it).
+        self.results: dict[str, int] = {}
+
 
     def _set_guard(self, root: Path) -> SafetyGuard:
 
-        """Switch the active guard to `root`, keeping engine exclusions (P0-3)."""
+        """Switch the active guard to `root`, keeping engine exclusions (P0-3).
 
-        self.guard = self.make_guard(root, is_system_root=True)
+        System-internal targets are hardcoded, reviewed cleanup roots; they are
+        allowed to be shallow (F3: the shallow-target capability is reserved
+        for these internal targets, never for user-supplied custom rules).
+        """
+
+        self.guard = self.make_guard(root, allow_shallow_system_target=True)
 
         return self.guard
 
@@ -1845,7 +2088,11 @@ class SystemCleaner(CleanerEngine):
 
             self._set_guard(SYSTEM_TEMP)
 
+            before = freed
+
             freed += self._del_dir_contents(SYSTEM_TEMP, "Windows System Temp")
+
+            self.results["System Temp"] = freed - before
 
 
         # User Temp
@@ -1854,7 +2101,11 @@ class SystemCleaner(CleanerEngine):
 
             self._set_guard(USER_TEMP)
 
+            before = freed
+
             freed += self._del_dir_contents(USER_TEMP, "Windows User Temp")
+
+            self.results["User Temp"] = freed - before
 
 
         # User CrashDumps
@@ -1863,7 +2114,11 @@ class SystemCleaner(CleanerEngine):
 
             self._set_guard(USER_CRASH)
 
+            before = freed
+
             freed += self._del_dir_contents(USER_CRASH, "Windows App CrashDumps")
+
+            self.results["App CrashDumps"] = freed - before
 
 
         # Explorer Thumbnails
@@ -1871,6 +2126,8 @@ class SystemCleaner(CleanerEngine):
         if self.targets.get("Explorer Thumbnails", True) and USER_EXPLORER.exists():
 
             guard = self._set_guard(USER_EXPLORER)
+
+            before = freed
 
             try:
 
@@ -1889,6 +2146,8 @@ class SystemCleaner(CleanerEngine):
             except OSError:
 
                 pass  # expected: thumbnail cache may be in use
+
+            self.results["Explorer Thumbnails"] = freed - before
 
 
         # Deep AppData Caches
@@ -1914,7 +2173,11 @@ class SystemCleaner(CleanerEngine):
 
             self._set_guard(target_path)
 
+            before = freed
+
             freed += self._del_dir_contents(target_path, desc)
+
+            self.results[desc] = freed - before
 
 
         # Windows Update Cache
@@ -1939,11 +2202,15 @@ class SystemCleaner(CleanerEngine):
 
                     self._set_guard(wu_path)
 
+                    before = freed
+
                     if self.dry_run:
                         # T-095: dry-run performs ZERO service mutation.
                         freed += self._del_dir_contents(wu_path, "Windows Update Cache")
                     else:
                         freed += self._clean_windows_update_cache(wu_path)
+
+                    self.results["Windows Update Cache"] = freed - before
 
                 else:
 
@@ -2010,7 +2277,11 @@ class SystemCleaner(CleanerEngine):
 
             self.log.section("Deep C: Junk")
 
+            before = freed
+
             freed += self._deep_junk_sweep()
+
+            self.results["Deep C: Junk"] = freed - before
 
         return freed
 
@@ -2028,52 +2299,65 @@ class SystemCleaner(CleanerEngine):
 
 
     def _clean_windows_update_cache(self, wu_path: Path) -> int:
-        """T-095: transaction-safe wuauserv stop / clean / restore.
+        """F2/T-095: transaction-safe wuauserv stop / clean / restore.
 
+        Deletion is authorized ONLY by an EXACT 'STOPPED' state:
         - Queries the ORIGINAL service state.
-        - Stops only if it was running; VERIFIES the stopped state.
-        - If stop/verify fails -> SKIPS the deletion (never delete under an
-          unverified service state).
+        - RUNNING / START_PENDING -> requests a stop.
+        - STOP_PENDING is WAIT, not authorization: the state is polled until
+          the EXACT 'STOPPED' value appears, bounded by _WU_STOP_POLL_TIMEOUT.
+        - timeout, nonzero stop exit, UNKNOWN, PAUSED or any unhandled state
+          => SKIP the cache deletion (never delete under an unverified state).
         - Restores the ORIGINAL state in a finally, so a cancellation or
           deletion error cannot leave wuauserv stopped.
-        - Originally stopped => stays stopped (never started).
+        - Originally STOPPED => stays stopped (never started).
+        - Dry-run performs ZERO service mutation (the caller only reaches this
+          path when dry_run is False).
         """
         import subprocess
 
         freed = 0
         orig = self._service_state("wuauserv")
-        stopped_by_us = False
-        ok = True
-
-        if orig in ("RUNNING", "STOP_PENDING", "START_PENDING"):
-            stop = subprocess.run(["net", "stop", "wuauserv"], capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
-            if stop.returncode in (0, 2):
-                now = self._service_state("wuauserv")
-                if now in ("STOPPED", "STOP_PENDING"):
-                    stopped_by_us = (stop.returncode == 0)
-                else:
-                    self.log.warning(f"wuauserv did not reach a stopped state (now {now!r})")
-                    ok = False
-            else:
-                self.log.warning(f"Failed to stop wuauserv (exit {stop.returncode})")
-                ok = False
-        elif orig is None:
+        if orig is None:
             self.log.warning("wuauserv state unknown; skipping Windows Update Cache")
-            ok = False
-        # orig == "STOPPED": nothing to stop, deletion may proceed.
-
-        if not ok:
-            self.log.info("  [SKIP] Windows Update Cache: wuauserv could not be safely stopped.")
+            return 0
+        if orig not in ("RUNNING", "STOPPED", "START_PENDING"):
+            self.log.warning(f"wuauserv in unhandled state {orig!r}; skipping Windows Update Cache")
             return 0
 
+        should_stop = orig in ("RUNNING", "START_PENDING")
+        if not should_stop:
+            # already EXACTLY STOPPED: deletion may proceed, nothing to restore.
+            return self._del_dir_contents(wu_path, "Windows Update Cache")
+
+        # We are about to stop a service that was running. Whatever happens
+        # afterwards -- stop failure, STOP_PENDING timeout, cancellation,
+        # deletion error -- the ORIGINAL state is restored in a finally, so the
+        # service can never be left stopped by this method.
         try:
+            stop = subprocess.run(["net", "stop", "wuauserv"], capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
+            if stop.returncode not in (0, 2):
+                self.log.warning(f"Failed to stop wuauserv (exit {stop.returncode}); skipping Windows Update Cache")
+                return 0
+            deadline = time.monotonic() + _WU_STOP_POLL_TIMEOUT
+            while True:
+                now = self._service_state("wuauserv")
+                if now == "STOPPED":
+                    break
+                if now == "STOP_PENDING":
+                    if time.monotonic() >= deadline:
+                        self.log.warning("wuauserv stuck in STOP_PENDING; skipping Windows Update Cache")
+                        return 0
+                    time.sleep(_WU_STOP_POLL_INTERVAL)
+                    continue
+                self.log.warning(f"wuauserv did not reach STOPPED (now {now!r}); skipping Windows Update Cache")
+                return 0
             freed += self._del_dir_contents(wu_path, "Windows Update Cache")
+            return freed
         finally:
-            if stopped_by_us or orig in ("RUNNING", "START_PENDING"):
-                start = subprocess.run(["net", "start", "wuauserv"], capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
-                if start.returncode != 0:
-                    self.log.warning(f"Failed to restart wuauserv (exit {start.returncode})")
-        return freed
+            start = subprocess.run(["net", "start", "wuauserv"], capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
+            if start.returncode != 0:
+                self.log.warning(f"Failed to restart wuauserv (exit {start.returncode})")
 
 
     def _deep_junk_sweep(self) -> int:
@@ -2290,7 +2574,7 @@ class CustomCleaner(CleanerEngine):
                 continue
 
 
-            self.guard = self.make_guard(target, is_system_root=True)
+            self.guard = self.make_guard(target)
 
             guard = self.guard
 
@@ -2597,21 +2881,33 @@ class ProgressTracker:
                 c = self.categories[self.current_category]
                 c['current'] += 1
                 c['bytes'] += bytes_freed
-    def finish_category(self, status='done'):
+    def finish_category(self, status='done', total_bytes=None):
         with self.lock:
             if self.current_category and self.current_category in self.categories:
-                self.categories[self.current_category]['status'] = status
+                c = self.categories[self.current_category]
+                c['status'] = status
+                if total_bytes is not None:
+                    # F8: feed the layer's real planned total from the shared
+                    # planner so a completed layer shows a truthful determinate bar.
+                    c['total'] = total_bytes
     def get_snapshot(self):
         with self.lock:
-            items_done = 0; total_bytes = 0; planned = 0; cats = []
+            items_done = 0; total_bytes = 0; planned_bytes = 0; cats = []
             for name in self.category_order:
                 c = self.categories.get(name, {})
                 cur = c.get('current', 0); t = c.get('total', 0)
                 items_done += cur; total_bytes += c.get('bytes', 0)
-                if t > 0: planned += t
+                if t > 0: planned_bytes += t
                 cats.append({'name': name, 'current': cur, 'total': t, 'bytes': c.get('bytes', 0), 'status': c.get('status', 'pending')})
             elapsed = time.time() - self.start_time
-            return {'categories': cats, 'total_current': items_done, 'total_bytes': total_bytes, 'total_items_done': items_done, 'total_items_planned': planned, 'elapsed': elapsed, 'current_category': self.current_category}
+            # F8: a determinate bar is only truthful when a real total exists.
+            # While any running category has no known total, the UI must use an
+            # indeterminate/status mode instead of a fake 0% determinate bar.
+            running_unknown = any(c.get('status') == 'running' and c.get('total', 0) <= 0 for c in self.categories.values())
+            return {'categories': cats, 'total_current': items_done, 'total_bytes': total_bytes,
+                    'total_items_done': items_done, 'total_bytes_planned': planned_bytes,
+                    'running_unknown_total': running_unknown, 'elapsed': elapsed,
+                    'current_category': self.current_category}
 
 
 # Only targets with a real, safe implementation live here (P2-14). Risky
@@ -2638,15 +2934,20 @@ def merged_system_targets(overrides) -> dict[str, bool]:
             out[name] = bool(val)
     return out
 
-def calculate_target_sizes(targets):
-    result = {}
-    if targets.get('System Temp', True) and SYSTEM_TEMP.exists(): result['System Temp'] = get_size(SYSTEM_TEMP)
-    if targets.get('User Temp', True) and USER_TEMP.exists(): result['User Temp'] = get_size(USER_TEMP)
-    if targets.get('App CrashDumps', True) and USER_CRASH.exists(): result['App CrashDumps'] = get_size(USER_CRASH)
-    if targets.get('Explorer Thumbnails', True) and USER_EXPLORER.exists(): result['Explorer Thumbnails'] = get_size(USER_EXPLORER)
-    for t, d, *_ in USER_APPDATA_TARGETS:
-        if targets.get(d, True) and t.exists(): result[d] = get_size(t)
-    return result
+def calculate_target_sizes(targets, exclude_patterns=None, exclude_paths=None):
+    """Per-target planned bytes from the SAME read-only planner as dry-run (F4).
+
+    Runs a quiet dry-run SystemCleaner, so every gate the real dry-run applies
+    -- process ownership, exclusions, NEVER_DELETE names, depth, symlink
+    refusal -- applies here too. This replaces the old raw get_size() pseudo
+    cleaner whose numbers never matched a real dry-run. Returns a dict of
+    target-name -> planned bytes (only targets whose block actually ran).
+    """
+    log = Logger(log_file=None, dry_run=True, quiet=True)
+    c = SystemCleaner(True, log, DEFAULT_THREADS, targets, None,
+                      exclude_patterns=exclude_patterns, exclude_paths=exclude_paths)
+    c.run_all()
+    return dict(c.results)
 
 def _canonical_exclusions(patterns, paths):
     """Dedupe + canonicalize exclusions so every cleaner sees one identical set (P0-3)."""
@@ -2658,46 +2959,80 @@ def _canonical_exclusions(patterns, paths):
             pths.append(str(norm))
     return pats, pths
 
-def run_cleaning_job(dry_run, run_portable, run_system, run_custom, log, max_threads=DEFAULT_THREADS, sys_targets=None, cancel_event=None, exclude_patterns=None, exclude_paths=None, progress=None):
+def run_cleaning_job(dry_run, run_portable, run_system, run_custom, log, max_threads=DEFAULT_THREADS, sys_targets=None, cancel_event=None, exclude_patterns=None, exclude_paths=None, progress=None, config=None):
+    """Execute (or, when dry_run, plan) one cleaning job on a FROZEN config snapshot.
+
+    F5: the config is loaded+validated exactly once by the caller and passed in;
+    this function NEVER reloads it mid-job, so a config file change during a run
+    cannot mix snapshot A settings with snapshot B roots/rules.
+
+    F4: returns a results dict with the per-layer planned/freed bytes and the
+    per-target system results -- the single source of truth shared by dry-run,
+    --status and the GUI preview/progress estimation.
+    """
+    cfg = config if config is not None else load_config()
     exclude_patterns, exclude_paths = _canonical_exclusions(exclude_patterns, exclude_paths)
+    results: dict = {}
     log.header(f"Smart VAC Cleaner v{VERSION} | {'DRY-RUN' if dry_run else 'DELETE MODE'} | {datetime.now().astimezone()}")
     if dry_run: log.info('[DRY-RUN] Nothing will be deleted.')
     else: log.info('[WARNING] DELETE MODE active!')
     if run_portable:
-        config = load_config()
-        roots = [Path(r) for r in config.get('portable_roots', []) if Path(r).exists()]
+        roots = [Path(r) for r in cfg.get('portable_roots', []) if Path(r).exists()]
         if not roots:
             log.info('No portable roots configured (see cleaner_config.json) - skipped.')
         if progress: progress.start_category('Portable')
+        portable_freed = 0
         for r in roots:
             if cancel_event and cancel_event.is_set(): raise CancelJobException('Cancelled')
-            PortableCleaner(dry_run, log, SafetyGuard(r), r, max_threads, cancel_event, exclude_patterns=exclude_patterns, exclude_paths=exclude_paths, progress=progress).run_all()
-        if progress: progress.finish_category()
+            portable_freed += PortableCleaner(dry_run, log, SafetyGuard(r), r, max_threads, cancel_event, exclude_patterns=exclude_patterns, exclude_paths=exclude_paths, progress=progress).run_all()
+        if progress: progress.finish_category(total_bytes=portable_freed)
+        results['portable'] = portable_freed
     if run_system:
         if cancel_event and cancel_event.is_set(): raise CancelJobException('Cancelled')
         if progress: progress.start_category('System')
-        SystemCleaner(dry_run, log, max_threads, sys_targets, cancel_event, exclude_patterns=exclude_patterns, exclude_paths=exclude_paths, progress=progress).run_all()
-        if progress: progress.finish_category()
+        sc = SystemCleaner(dry_run, log, max_threads, sys_targets, cancel_event, exclude_patterns=exclude_patterns, exclude_paths=exclude_paths, progress=progress)
+        system_freed = sc.run_all()
+        results['system'] = dict(sc.results)
+        results['system_bytes'] = system_freed
+        if progress: progress.finish_category(total_bytes=system_freed)
     if run_custom:
         if cancel_event and cancel_event.is_set(): raise CancelJobException('Cancelled')
-        config = load_config()
-        if config.get('custom_rules'):
+        rules = cfg.get('custom_rules', [])
+        if rules:
             if progress: progress.start_category('Custom')
-            CustomCleaner(dry_run, log, config['custom_rules'], max_threads, cancel_event, exclude_patterns=exclude_patterns, exclude_paths=exclude_paths, progress=progress).run_all()
-            if progress: progress.finish_category()
+            custom_freed = CustomCleaner(dry_run, log, rules, max_threads, cancel_event, exclude_patterns=exclude_patterns, exclude_paths=exclude_paths, progress=progress).run_all()
+            if progress: progress.finish_category(total_bytes=custom_freed)
+        else:
+            custom_freed = 0
+        results['custom'] = custom_freed
     log.summary()
+    return results
 
 def cli_status():
+    """--status: planned bytes from the SAME read-only planner as dry-run (F4).
+
+    Runs the shared dry-run planner on a single config snapshot and reports the
+    per-target system results plus portable/custom totals. The candidate truth
+    is identical to a dry-run for the same snapshot/config.
+    """
     config = load_config()
     print(f"Smart VAC Cleaner v{VERSION}")
     print(f"Config: {CONFIG_FILE}")
     print(f"Custom rules: {len(config.get('custom_rules', []))}")
-    sizes = calculate_target_sizes(dict(SYSTEM_TARGET_DEFAULTS))
+    quiet = Logger(log_file=None, dry_run=True, quiet=True)
+    results = run_cleaning_job(True, True, True, True, quiet, config=config)
+    sizes = results.get("system", {})
     print('System targets:')
 
     for name, sz in sorted(sizes.items()):
         if sz > 0: print(f'  {fmt(sz):>10}  {name}')
     total = sum(sizes.values())
+    total += results.get('portable', 0)
+    total += results.get('custom', 0)
+    if results.get('portable'):
+        print(f'  {fmt(results["portable"]):>10}  PORTABLE')
+    if results.get('custom'):
+        print(f'  {fmt(results["custom"]):>10}  CUSTOM')
     print(f'  {"-"*30}')
     print(f'  {fmt(total):>10}  TOTAL')
 
@@ -2746,6 +3081,7 @@ class App(ctk.CTk):
         self.configure(fg_color=WIN95_BG)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.progress = ProgressTracker()
+        self._pulse = 0  # F8: indeterminate-pulse phase counter
         self.log_queue = queue.Queue()
         self.cancel_event = threading.Event()
         self.sys_targets = merged_system_targets(self.config.get("system_targets"))
@@ -2898,7 +3234,10 @@ class App(ctk.CTk):
             # Safe defaults: risky opt-in targets stay off unless the user
             # enabled them via the System Targets dialog (P1-7).
             all_targets = dict(self.sys_targets)
-            run_cleaning_job(dry_run, True, True, True, log, DEFAULT_THREADS, all_targets, self.cancel_event, progress=self.progress, exclude_patterns=self.config.get('exclude_patterns'), exclude_paths=self.config.get('exclude_paths'))
+            # F5: freeze the config snapshot once per job; mutable GUI edits
+            # apply to the NEXT job only, never mid-job.
+            config_snapshot = copy.deepcopy(self.config)
+            run_cleaning_job(dry_run, True, True, True, log, DEFAULT_THREADS, all_targets, self.cancel_event, progress=self.progress, exclude_patterns=config_snapshot.get('exclude_patterns'), exclude_paths=config_snapshot.get('exclude_paths'), config=config_snapshot)
         except CancelJobException:
             self._log(self.T["cancelled"])
         except Exception as e:
@@ -2977,8 +3316,17 @@ class App(ctk.CTk):
         s = self.progress.get_snapshot()
         e = f"{int(s['elapsed']//60):02d}:{int(s['elapsed']%60):02d}"
         self.dash_stats.configure(text=f"Items: {s['total_current']}  Freed: {fmt(s['total_bytes'])}  Elapsed: {e}")
-        if s['total_items_planned'] > 0:
-            self.dash_bar.set(min(s['total_current'] / s['total_items_planned'], 1.0))
+        # F8: no fake determinate bars. A determinate fill is shown only when a
+        # real planned byte total exists; otherwise the bar is indeterminate
+        # (working pulse) -- never a static 0% that implies 'nothing done'.
+        self._pulse = getattr(self, "_pulse", 0) + 1
+        triangle = abs(((self._pulse % 40) / 20.0) - 1.0)
+        if s['total_bytes_planned'] > 0 and not s['running_unknown_total']:
+            self.dash_bar.set(min(s['total_bytes'] / s['total_bytes_planned'], 1.0))
+        elif s['current_category']:
+            self.dash_bar.set(triangle)
+        else:
+            self.dash_bar.set(0)
         # Auto-create + update per-category bars
         n_cats = len(s['categories'])
         if n_cats > 0:
@@ -2991,10 +3339,13 @@ class App(ctk.CTk):
                 self._add_cat_bar(nm)
             w = self.dash_cat_widgets.get(nm)
             if w:
-                cur, tot, byt = cat_data['current'], cat_data['total'], cat_data['bytes']
-                w['label'].configure(text=f"{nm}: {cur}/{tot}  {fmt(byt)}" if tot > 0 else f"{nm}: {cur}  {fmt(byt)}")
+                tot, byt = cat_data['total'], cat_data['bytes']
                 if tot > 0:
-                    w['bar'].set(min(cur / tot, 1.0))
+                    w['label'].configure(text=f"{nm}: {fmt(byt)}/{fmt(tot)}")
+                    w['bar'].set(min(byt / tot, 1.0))
+                else:
+                    w['label'].configure(text=f"{nm}: {fmt(byt)} (scanning)" if cat_data['status'] == 'running' else f"{nm}: {fmt(byt)}")
+                    w['bar'].set(triangle)
 
     def _rebuild_cat_bars(self):
         for w in list(self.dash_cat_widgets.values()):
@@ -3325,7 +3676,8 @@ def main():
             max_threads=DEFAULT_THREADS,
             sys_targets=st,
             exclude_patterns=config.get("exclude_patterns", []) + ep,
-            exclude_paths=config.get("exclude_paths", [])
+            exclude_paths=config.get("exclude_paths", []),
+            config=config
         )
         return
 

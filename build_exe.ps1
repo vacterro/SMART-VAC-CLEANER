@@ -9,6 +9,7 @@ if (-not $?) { throw "pyinstaller install failed" }
 python -m PyInstaller --onefile --console --clean --noconfirm `
     --name SmartVACCleaner `
     --collect-data customtkinter `
+    --add-data "strings;strings" `
     _SMART_VAC_CLEANER.py
 if (-not $?) { throw "pyinstaller build failed" }
 

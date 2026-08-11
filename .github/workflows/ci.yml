@@ -23,3 +23,20 @@ jobs:
 
       - name: Tests
         run: pytest -q
+
+  package:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps (GUI stack visible to the smoke venv)
+        run: |
+          pip install -r requirements.txt
+
+      - name: Clean wheel-install smoke (F6)
+        run: |
+          python test_package_install.py
