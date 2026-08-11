@@ -1,5 +1,8 @@
 # Changelog
 
+## v2.6.5
+- **Safety hardening audit (T-111..T-122)**: plan is no longer permission forever -- every file/dir/root mutation is re-authorized just-in-time against the identity captured during planning, so a swapped, replaced, symlinked or recreated object is skipped, never deleted (TOCTOU close, T-111). Windows Update purge deletes only under an exact `STOPPED` service state and restores the original state on every path (T-112). Custom rules now enforce the same shallow-root depth protection as user roots (T-113). `--status`, GUI preview and dry-run share one read-only planner, so their bytes and candidate sets are identical (T-114); config is loaded once per job and frozen (T-115). Wheel packaging ships `_fs_helpers`/`analyze_caches` and the locale files, with a clean-install smoke test (T-116). Zero-byte deletions are counted as successes (T-117); progress bars are determinate only when a real total exists (T-118); stale version claims and an installed 2.1.0 dist were removed (T-119); the process-owner map got semantic provenance and a corrected `devin` executable (T-120); dead/duplicate helpers collapsed (T-121); a mutation-chokepoint and Safety-doc contract regression suite was added (T-122). 224 tests green, ruff clean.
+
 ## v2.6.4
 - **README/screenshot doc-drift fix (T-109)**: GUI docs updated from "five buttons" to seven -- the sidebar's *Preview* (read-only dry-run, T-107) and *System Targets* (risky-target opt-in, T-105) buttons were missing from the README and its translations. README.md/ru/et/ded rewritten, screenshot regenerated from the live build, translation package refreshed (ee). 179 tests green, ruff clean.
 
