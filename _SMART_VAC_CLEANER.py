@@ -59,7 +59,7 @@ import customtkinter as ctk
 
 
 
-VERSION = "2.6.5"
+VERSION = "2.6.6"
 
 DEFAULT_THREADS = 12
 
@@ -130,6 +130,22 @@ MIN_PATH_PARTS = 5
 # never authorization; only the exact STOPPED state authorizes deletion.
 _WU_STOP_POLL_TIMEOUT = 30.0
 _WU_STOP_POLL_INTERVAL = 0.25
+
+# T-131: re-check the owning process state every N file mutations inside a long
+# directory plan, not once per file (tasklist is expensive).
+_OWNER_REFRESH_BATCH = 64
+
+# T-134: explicit mutation inventory by subsystem. Every filesystem mutation the
+# cleaner performs must live in one of these allowed sites; the chokepoint test
+# fails on ANY unknown cleaner mutation primitive.
+_CLEANER_MUTATION_SITES = ("_apply_file_plan", "_apply_tree_plan")
+_CLEANER_MUTATION_TOKENS = (".chmod(", ".unlink(", ".rmdir(")
+_CONFIG_PERSISTENCE_SITES = ("save_config",)
+_CONFIG_PERSISTENCE_TOKENS = (".replace(",)  # atomic config save (Path.replace)
+_SERVICE_ACTION_SITES = ("_clean_windows_update_cache", "run_all", "_service_state")
+_SERVICE_ACTION_TOKENS = ("net stop", "net start", "ipconfig", "SHEmptyRecycleBin", "sc query")
+_BANNED_CLEANER_PRIMITIVES = ("os.remove(", "os.unlink(", "os.rmdir(",
+                              "shutil.rmtree(", "shutil.move(", "Path.rename(", ".rename(")
 
 
 APP_PROCESSES: dict[str, set[str]] = {
@@ -772,6 +788,27 @@ def is_app_running(app_group: str, running: set[str] | None) -> bool:
     return bool(procs & running)
 
 
+def _owner_trust(app_group: str) -> str:
+    """T-130: 'verified' or 'unverified' trust for a process group.
+
+    Trust is decided by EVIDENCE, not by the presence of a provenance entry:
+      VERIFIED  - verified:disk, verified:runtimelog, or an independently
+                  justified product:exe mapping.
+      UNVERIFIED - unverified-exe (mapping kept but not confirmed) or any
+                  group with NO provenance.
+    A group with no process mapping (e.g. 'general') is trivially verified:
+    there is nothing running to guard against. An UNVERIFIED owner can never
+    authorize a real deletion of an app-sensitive target (fail closed); it may
+    only appear in DISCOVERED / NOT AUTHORIZED reporting.
+    """
+    if not APP_PROCESSES.get(app_group):
+        return "verified"
+    prov = APP_PROCESSES_PROVENANCE.get(app_group, "")
+    if prov.startswith(("verified:", "product:")):
+        return "verified"
+    return "unverified"
+
+
 def is_link(path: Path) -> bool:
     """True for symlinks and (on Windows) junctions/reparse points."""
     try:
@@ -1192,6 +1229,52 @@ class SafetyGuard:
 
 
 
+class CandidateLedger:
+    """Job-level claim registry (T-124): ONE physical candidate is planned ONCE.
+
+    Each cleaner claims the subtree it plans; a later target fully inside an
+    existing claim is skipped, and a target that is an ancestor of existing
+    claims absorbs them (its plan must EXCLUDE the absorbed subtrees so their
+    bytes are not double-counted). Paths are canonicalized before comparison so
+    aliases collapse; ancestor/descendant overlap is handled, not only exact
+    duplicates. Shared by every layer of one job (portable/system/custom).
+    """
+
+    def __init__(self):
+        self._claims: list[Path] = []
+        self._lock = threading.Lock()
+
+    @staticmethod
+    def _canon(p: Path) -> Path:
+        try:
+            return p.resolve()
+        except OSError:
+            return p.absolute()
+
+    def covered(self, path: Path) -> bool:
+        """True when `path` is inside an existing claim (equal or descendant)."""
+        c = self._canon(path)
+        with self._lock:
+            return any(_is_ancestor(x, c) for x in self._claims)
+
+    def claims_within(self, path: Path) -> list[Path]:
+        """Existing claims strictly inside `path` (to exclude from its plan)."""
+        c = self._canon(path)
+        with self._lock:
+            return [x for x in self._claims if _is_ancestor(c, x) and x != c]
+
+    def claim(self, path: Path) -> None:
+        """Register `path`'s subtree as claimed, absorbing claims inside it."""
+        c = self._canon(path)
+        with self._lock:
+            self._claims = [x for x in self._claims if not _is_ancestor(c, x)]
+            self._claims.append(c)
+
+    def __len__(self) -> int:
+        with self._lock:
+            return len(self._claims)
+
+
 class CancelJobException(Exception):
 
     """Raised when the user cancels the running job."""
@@ -1204,7 +1287,7 @@ class CleanerEngine:
 
     def __init__(self, dry_run: bool, log: Logger, guard: SafetyGuard, root: Path, max_threads: int = DEFAULT_THREADS, cancel_event: threading.Event | None = None,
 
-                 exclude_patterns: list[str] | None = None, exclude_paths: list[str] | None = None, progress=None):
+                 exclude_patterns: list[str] | None = None, exclude_paths: list[str] | None = None, progress=None, ledger: CandidateLedger | None = None):
 
         self.exclude_patterns = exclude_patterns or []
 
@@ -1225,6 +1308,12 @@ class CleanerEngine:
         self.running = get_running_processes()
 
         self.guard = self.make_guard(guard.base_root, guard.allow_shallow_system_target)
+
+        self.ledger = ledger
+
+        # T-131: app-sensitive targets carry their owner group so the apply
+        # phase can re-check the process state just-in-time (process TOCTOU).
+        self._owner_group: str | None = None
 
 
     def make_guard(self, root: Path, allow_shallow_system_target: bool = False) -> SafetyGuard:
@@ -1250,6 +1339,44 @@ class CleanerEngine:
         """Re-query the process table before a destructive app group (P1-8)."""
 
         self.running = get_running_processes()
+
+
+    def _ledger_gate(self, path: Path, desc: str) -> bool:
+        """Job-level dedup gate for a top-level target (T-124).
+
+        False when another cleaner already claims this subtree -- the target
+        must not be planned a second time. This is checked at plan time; the
+        claim is registered only after a successful plan.
+        """
+        if self.ledger is None:
+            return True
+        if self.ledger.covered(path):
+            self.log.skipped(path, "Already covered by an earlier candidate claim")
+            return False
+        return True
+
+
+    def _ledger_claims_within(self, path: Path) -> list[Path]:
+        if self.ledger is None:
+            return []
+        return self.ledger.claims_within(path)
+
+
+    def _ledger_claim(self, path: Path) -> None:
+        if self.ledger is not None:
+            self.ledger.claim(path)
+
+
+    def _owner_gate_ok(self, app: str | None) -> bool:
+        """T-131: just-in-time process check for an app-sensitive target.
+
+        Refreshes the process table and refuses when the owning app is running
+        or the snapshot is UNKNOWN. Returns True when no process gate applies.
+        """
+        if not app or app == "general" or not APP_PROCESSES.get(app):
+            return True
+        self.refresh_running()
+        return not is_app_running(app, self.running)
 
 
     def _log_deleted(self, path: Path, size: int, desc: str) -> None:
@@ -1287,6 +1414,7 @@ class CleanerEngine:
         """THE single just-in-time mutation authorization gate (F1).
 
         Runs immediately before every chmod/unlink/rmdir on every candidate:
+        0. cancellation is a mutation invariant (T-132).
         1. lstat the path again.
         2. refuse symlink/reparse/junction.
         3. re-run the active SafetyGuard.
@@ -1294,6 +1422,7 @@ class CleanerEngine:
         Anything missing / changed / uncertain => (False, reason); the caller
         must SKIP and never mutate. Never chmod before this gate.
         """
+        self.check_cancel()
         try:
             st = path.lstat()
         except OSError:
@@ -1345,11 +1474,18 @@ class CleanerEngine:
         return MutationResult(False, 0, "File in use or access denied")
 
 
-    def _del_file(self, path: Path, desc: str) -> int:
+    def _del_file(self, path: Path, desc: str, owner_group: str | None = None) -> int:
 
-        """Delete one file. Counters/log/progress advance only after verified success (P1-12/F7)."""
+        """Delete one file. Counters/log/progress advance only after verified success (P1-12/F7).
+
+        owner_group (T-131): when set, the owning process state is re-checked
+        just-in-time before the mutation batch; a running/UNKNOWN owner aborts.
+        """
 
         self.check_cancel()
+
+        if not self._ledger_gate(path, desc):
+            return 0
 
         plan = self._plan_file(path)
         if plan is None:
@@ -1357,9 +1493,17 @@ class CleanerEngine:
 
         size, identity = plan
 
+        # T-124: the claim registers the candidate truth and is mode-independent
+        # (dry-run and real-delete must see the SAME candidate set).
+        self._ledger_claim(path)
+
         if self.dry_run:
             self._log_deleted(path, size, desc)
             return size
+
+        if owner_group is not None and not self._owner_gate_ok(owner_group):
+            self.log.skipped(path, f"'{owner_group}' became running or unknown before delete; aborting target")
+            return 0
 
         result = self._apply_file_plan(path, size, identity)
         if result.success:
@@ -1369,7 +1513,7 @@ class CleanerEngine:
         return result.bytes_freed
 
 
-    def _plan_tree(self, path: Path, desc: str):
+    def _plan_tree(self, path: Path, desc: str, excluded_regions: list[Path] | tuple = ()):
         """READ-ONLY discovery of a deletable tree (T-090/F1).
 
         Validates every node via guard.is_safe, collects deletable files + dirs,
@@ -1392,6 +1536,13 @@ class CleanerEngine:
             self.log.skipped(path, "Root identity could not be established")
             return None
 
+        # T-124: prior claims absorbed by this target are excluded from the plan
+        # so their bytes are never counted a second time.
+        def _in_excluded(p: Path) -> bool:
+            if not excluded_regions:
+                return False
+            return any(_is_ancestor(r, p) for r in excluded_regions)
+
         protected: set[Path] = set()
 
         # Phase 1: find protected nodes top-down (do not descend into them).
@@ -1399,6 +1550,9 @@ class CleanerEngine:
         while stack:
             cur = stack.pop()
             self.check_cancel()
+            if _in_excluded(cur):
+                protected.add(cur)
+                continue
             ok, _reason = self.guard.is_safe(cur)
             if not ok or is_link(cur):
                 protected.add(cur)
@@ -1426,7 +1580,7 @@ class CleanerEngine:
                 for entry in os.scandir(cur):
                     e = Path(entry.path)
                     if entry.is_file(follow_symlinks=False):
-                        if e in protected or is_link(e):
+                        if e in protected or is_link(e) or _in_excluded(e):
                             continue
                         ident = _capture_identity(e)
                         if not ident or ident.get("type") == "link_or_reparse":
@@ -1441,6 +1595,9 @@ class CleanerEngine:
                         if not ident or ident.get("type") == "link_or_reparse":
                             protected.add(e)
                             continue
+                        if _in_excluded(e):
+                            protected.add(e)
+                            continue
                         dirs.append((e, ident))
                         stack.append(e)
             except OSError:
@@ -1452,7 +1609,7 @@ class CleanerEngine:
                 "root_identity": root_identity}
 
 
-    def _apply_tree_plan(self, plan: dict, desc: str) -> tuple[int, bool]:
+    def _apply_tree_plan(self, plan: dict, desc: str, owner_group: str | None = None) -> tuple[int, bool]:
         """REAL delete of a planned tree. Returns (freed, fully_removed).
 
         MUTATES the filesystem. MUST be unreachable when dry_run is True.
@@ -1460,13 +1617,25 @@ class CleanerEngine:
         authorization gate immediately before its mutation (F1): a replaced /
         swapped / linked object is SKIPPED, never touched. No ad-hoc checks
         elsewhere -- this is the single chokepoint.
+
+        owner_group (T-131): the owning process state is re-checked just-in-time
+        before the mutation batch and periodically (every _OWNER_REFRESH_BATCH
+        files); a running/UNKNOWN owner aborts the remaining mutations.
         """
         freed = 0
         root = plan["root"]
         root_identity = plan["root_identity"]
-        for f, sz, ident in sorted(plan["files"], key=lambda x: len(x[0].parts), reverse=True):
+        files = sorted(plan["files"], key=lambda x: len(x[0].parts), reverse=True)
+        for idx, (f, sz, ident) in enumerate(files):
             self.check_cancel()
+            if owner_group is not None and idx % _OWNER_REFRESH_BATCH == 0 and not self._owner_gate_ok(owner_group):
+                self.log.skipped(root, f"'{owner_group}' became running or unknown; aborting remaining target mutations")
+                return freed, False
             freed += self._apply_file_plan(f, sz, ident).bytes_freed
+
+        if owner_group is not None and not self._owner_gate_ok(owner_group):
+            self.log.skipped(root, f"'{owner_group}' became running or unknown; aborting remaining target mutations")
+            return freed, False
 
         fully = root not in plan["protected"]
         for d, ident in sorted(plan["dirs"], key=lambda x: len(x[0].parts), reverse=True):
@@ -1499,12 +1668,13 @@ class CleanerEngine:
         return freed, fully
 
 
-    def _del_dir(self, path: Path, desc: str) -> int:
+    def _del_dir(self, path: Path, desc: str, owner_group: str | None = None) -> int:
 
         """Delete a directory tree, preserving protected/excluded descendants (P0-4).
 
         Planning is read-only and runs for BOTH modes; the apply phase runs
-        only when dry_run is False (T-090).
+        only when dry_run is False (T-090). owner_group (T-131) is re-checked
+        just-in-time before the apply batch.
         """
 
         self.check_cancel()
@@ -1512,16 +1682,28 @@ class CleanerEngine:
         if not path.exists() or not path.is_dir():
             return 0
 
-        plan = self._plan_tree(path, desc)
+        if not self._ledger_gate(path, desc):
+            return 0
+
+        excluded = self._ledger_claims_within(path)
+        plan = self._plan_tree(path, desc, excluded_regions=excluded)
         if plan is None:
             return 0
+
+        # T-124: the claim registers the candidate truth and is mode-independent
+        # (dry-run and real-delete must see the SAME candidate set).
+        self._ledger_claim(path)
 
         if self.dry_run:
             if plan["bytes"] > 0:
                 self._log_deleted(path, plan["bytes"], desc)
             return plan["bytes"]
 
-        freed, fully = self._apply_tree_plan(plan, desc)
+        if owner_group is not None and not self._owner_gate_ok(owner_group):
+            self.log.skipped(path, f"'{owner_group}' became running or unknown before delete; aborting target")
+            return 0
+
+        freed, fully = self._apply_tree_plan(plan, desc, owner_group=owner_group)
         if fully:
             self._log_deleted(path, freed, desc)
         elif freed > 0:
@@ -1534,12 +1716,15 @@ class CleanerEngine:
         return freed
 
 
-    def _del_dir_contents(self, path: Path, desc: str) -> int:
+    def _del_dir_contents(self, path: Path, desc: str, owner_group: str | None = None) -> int:
 
         if not path.exists() or not path.is_dir(): return 0
 
         if is_link(path):
             self.log.skipped(path, "Symlink/reparse point refused")
+            return 0
+
+        if not self._ledger_gate(path, desc):
             return 0
 
         freed = 0
@@ -1568,43 +1753,55 @@ class CleanerEngine:
             return 0
 
         if not items:
+            self._ledger_claim(path)
+            return 0
+
+        if owner_group is not None and not self._owner_gate_ok(owner_group):
+            self.log.skipped(path, f"'{owner_group}' became running or unknown before delete; aborting target")
             return 0
 
         if self.max_threads > 1 and len(items) > 1:
-            # Bounded in-flight futures (T-094): cancel is checked before every
-            # submit, submissions stop immediately on cancel, pending futures
-            # are cancelled, never enqueued by the thousands.
+            # Bounded in-flight futures (T-094/T-132): cancel is checked before
+            # every submit, submissions stop immediately on cancel, pending
+            # futures are cancelled, and the executor shuts down with
+            # cancel_futures=True so running work stops at the next
+            # cancel-aware mutation gate. Owner state (T-131) is re-checked
+            # once per batch window, never per child.
             _MAX_IN_FLIGHT = max(1, self.max_threads * 4)
             with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_threads) as executor:
                 pending = set()
                 idx = 0
-                while idx < len(items):
-                    self.check_cancel()
-                    while idx < len(items) and len(pending) < _MAX_IN_FLIGHT:
-                        pending.add(executor.submit(_handle, items[idx]))
-                        idx += 1
-                    if idx >= len(items):
-                        break
-                    done, pending = concurrent.futures.wait(pending, return_when=concurrent.futures.FIRST_COMPLETED)
-                    for f in done:
-                        try:
+                try:
+                    while idx < len(items):
+                        self.check_cancel()
+                        if owner_group is not None and not self._owner_gate_ok(owner_group):
+                            self.log.skipped(path, f"'{owner_group}' became running or unknown mid-sweep; aborting remaining mutations")
+                            break
+                        while idx < len(items) and len(pending) < _MAX_IN_FLIGHT:
+                            pending.add(executor.submit(_handle, items[idx]))
+                            idx += 1
+                        if idx >= len(items):
+                            break
+                        done, pending = concurrent.futures.wait(pending, return_when=concurrent.futures.FIRST_COMPLETED)
+                        for f in done:
                             freed += f.result()
-                        except CancelJobException:
-                            for fut in pending:
-                                fut.cancel()
-                            raise
-                        except Exception as e:
-                            self.log.warning(f"Future result failed: {e}")
-                for f in concurrent.futures.as_completed(pending):
-                    try:
+                    for f in concurrent.futures.as_completed(pending):
                         freed += f.result()
-                    except CancelJobException:
-                        raise
-                    except Exception as e:
-                        self.log.warning(f"Future result failed: {e}")
+                except CancelJobException:
+                    for fut in pending:
+                        fut.cancel()
+                    executor.shutdown(cancel_futures=True)
+                    raise
+                except Exception as e:
+                    self.log.warning(f"Future result failed: {e}")
         else:
             for item in items:
+                self.check_cancel()
+                if owner_group is not None and not self._owner_gate_ok(owner_group):
+                    self.log.skipped(path, f"'{owner_group}' became running or unknown mid-sweep; aborting remaining mutations")
+                    break
                 freed += _handle(item)
+        self._ledger_claim(path)
         return freed
 
 
@@ -1622,7 +1819,7 @@ class CleanerEngine:
             self.log.skipped(path, reason)
             return 0
 
-        return self._del_dir(path, desc)
+        return self._del_dir(path, desc, owner_group=app)
 
 
     def safe_del_file(self, path: Path, desc: str, app: str) -> int:
@@ -1639,7 +1836,7 @@ class CleanerEngine:
             self.log.skipped(path, reason)
             return 0
 
-        return self._del_file(path, desc)
+        return self._del_file(path, desc, owner_group=app)
 
 
     def safe_del_dir_contents(self, path: Path, desc: str, app: str) -> int:
@@ -1656,7 +1853,7 @@ class CleanerEngine:
             self.log.skipped(path, reason)
             return 0
 
-        return self._del_dir_contents(path, desc)
+        return self._del_dir_contents(path, desc, owner_group=app)
 
 
 class PortableCleaner(CleanerEngine):
@@ -1700,9 +1897,9 @@ class PortableCleaner(CleanerEngine):
 
                 desc = f"Numbered crash-backup: {item.name}"
 
-                if item.is_file(): freed += self._del_file(item, desc)
+                if item.is_file(): freed += self._del_file(item, desc, owner_group=app)
 
-                elif item.is_dir(): freed += self._del_dir(item, desc)
+                elif item.is_dir(): freed += self._del_dir(item, desc, owner_group=app)
 
         except OSError:
 
@@ -1743,7 +1940,7 @@ class PortableCleaner(CleanerEngine):
 
                     if item.suffix.lower() == ".tmp" and item.is_file() and self.guard.is_safe(item)[0]:
 
-                        freed += self._del_file(item, f"[{app}] Net tmp: {item.name}")
+                        freed += self._del_file(item, f"[{app}] Net tmp: {item.name}", owner_group=app)
 
             except OSError:
 
@@ -2007,14 +2204,24 @@ class PortableCleaner(CleanerEngine):
 
                         if item.name.lower() in target_names:
 
-                            # T-098: never delete a discovered cache under unknown
-                            # app ownership. Verified owners get a real process
-                            # gate; unowned targets are dry-run-report only.
-                            owner = self._universal_owner_for(item)
-                            if owner is None and not self.dry_run:
-                                self.log.skipped(item, "Discovered cache has no verified app owner; kept in real-delete mode")
+                            # T-124/T-125: Universal Sweeper is fallback
+                            # DISCOVERY only, never a second planner for the
+                            # same physical cache.
+                            #  - caches under a known portable app dir are owned
+                            #    by that app's DEDICATED sweeper -> defer, never
+                            #    plan a second time (one object -> one candidate).
+                            #  - caches with NO verified owner are NOT actionable
+                            #    in any mode: reported separately as DISCOVERED /
+                            #    NOT AUTHORIZED with zero planned bytes, zero
+                            #    candidates, zero progress.
+                            if self.ledger is not None and self.ledger.covered(item):
+                                self.log.skipped(item, "Already covered by an earlier candidate claim")
                                 continue
-                            freed += self.safe_del_dir_contents(item, f"[Universal Cache] {item.name}", owner or "general")
+                            owner = self._universal_owner_for(item)
+                            if owner is not None:
+                                self.log.skipped(item, f"Owned by dedicated sweeper ('{owner}'); universal discovery defers")
+                                continue
+                            self.log.info(f"  [DISCOVERED] {item} -- no verified owner; NOT AUTHORIZED to delete")
 
                         else:
 
@@ -2043,7 +2250,7 @@ class SystemCleaner(CleanerEngine):
 
     def __init__(self, dry_run: bool, log: Logger, max_threads: int = DEFAULT_THREADS, targets: dict[str, bool] | None = None, cancel_event: threading.Event | None = None,
 
-                 exclude_patterns: list[str] | None = None, exclude_paths: list[str] | None = None, progress=None):
+                 exclude_patterns: list[str] | None = None, exclude_paths: list[str] | None = None, progress=None, ledger: CandidateLedger | None = None):
 
         # The root here isn't a single drive, so we pass dummy C:\.
 
@@ -2051,7 +2258,7 @@ class SystemCleaner(CleanerEngine):
 
         super().__init__(dry_run, log, SafetyGuard(Path("C:\\")), Path("C:\\"), max_threads, cancel_event,
 
-                         exclude_patterns=exclude_patterns, exclude_paths=exclude_paths, progress=progress)
+                         exclude_patterns=exclude_patterns, exclude_paths=exclude_paths, progress=progress, ledger=ledger)
 
         self.targets = targets if targets is not None else {}
 
@@ -2165,6 +2372,15 @@ class SystemCleaner(CleanerEngine):
                 self.log.skipped(target_path, f"No verified owner for '{desc}'; skipping (T-092)")
                 continue
 
+            # T-130: an UNVERIFIED owner cannot authorize destructive cleaning in
+            # EITHER mode. Presence of a provenance entry is not trust; only a
+            # verified:disk/runtimelog or independently justified product:exe
+            # mapping is. The target is reported separately, contributing ZERO
+            # planned bytes/candidates/progress (discovery stays in --analyze-caches).
+            if app_group is not None and _owner_trust(app_group) == "unverified":
+                self.log.info(f"  [DISCOVERED] {target_path} -- owner '{app_group}' is UNVERIFIED; NOT AUTHORIZED to delete")
+                continue
+
             if app_group:
                 self.refresh_running()
                 if is_app_running(app_group, self.running):
@@ -2175,7 +2391,7 @@ class SystemCleaner(CleanerEngine):
 
             before = freed
 
-            freed += self._del_dir_contents(target_path, desc)
+            freed += self._del_dir_contents(target_path, desc, owner_group=app_group)
 
             self.results[desc] = freed - before
 
@@ -2532,11 +2748,11 @@ class CustomCleaner(CleanerEngine):
 
     def __init__(self, dry_run: bool, log: Logger, rules: list[dict], max_threads: int = DEFAULT_THREADS, cancel_event: threading.Event | None = None,
 
-                 exclude_patterns: list[str] | None = None, exclude_paths: list[str] | None = None, progress=None):
+                 exclude_patterns: list[str] | None = None, exclude_paths: list[str] | None = None, progress=None, ledger: CandidateLedger | None = None):
 
         super().__init__(dry_run, log, SafetyGuard(Path("C:\\")), Path("C:\\"), max_threads, cancel_event,
 
-                         exclude_patterns=exclude_patterns, exclude_paths=exclude_paths, progress=progress)
+                         exclude_patterns=exclude_patterns, exclude_paths=exclude_paths, progress=progress, ledger=ledger)
 
         self.rules = rules
 
@@ -2959,24 +3175,92 @@ def _canonical_exclusions(patterns, paths):
             pths.append(str(norm))
     return pats, pths
 
-def run_cleaning_job(dry_run, run_portable, run_system, run_custom, log, max_threads=DEFAULT_THREADS, sys_targets=None, cancel_event=None, exclude_patterns=None, exclude_paths=None, progress=None, config=None):
-    """Execute (or, when dry_run, plan) one cleaning job on a FROZEN config snapshot.
 
-    F5: the config is loaded+validated exactly once by the caller and passed in;
-    this function NEVER reloads it mid-job, so a config file change during a run
-    cannot mix snapshot A settings with snapshot B roots/rules.
+class JobSpec:
+    """ONE resolved policy contract per job (T-126).
 
-    F4: returns a results dict with the per-layer planned/freed bytes and the
-    per-target system results -- the single source of truth shared by dry-run,
-    --status and the GUI preview/progress estimation.
+    Everything a job needs is resolved HERE, once, at the surface boundary:
+    the frozen config snapshot, portable roots, custom rules, exclusions,
+    the resolved system-target mask and the execution surface. Cleaners
+    consume ONLY this immutable snapshot -- there is no downstream policy
+    reconstruction (CLI/status/GUI/background/scheduled all resolve through
+    the same function). The CandidateLedger is job-shared so one physical
+    candidate is planned once across every layer.
     """
-    cfg = config if config is not None else load_config()
-    exclude_patterns, exclude_paths = _canonical_exclusions(exclude_patterns, exclude_paths)
+
+    __slots__ = ("config", "dry_run", "exclude_paths", "exclude_patterns",
+                 "ledger", "run_custom", "run_portable", "run_system", "surface", "sys_targets")
+
+    def __init__(self, *, dry_run, run_portable, run_system, run_custom, config,
+                 sys_targets, exclude_patterns, exclude_paths, ledger, surface="cli"):
+        self.dry_run = bool(dry_run)
+        self.run_portable = bool(run_portable)
+        self.run_system = bool(run_system)
+        self.run_custom = bool(run_custom)
+        self.config = config
+        self.sys_targets = sys_targets
+        self.exclude_patterns = tuple(exclude_patterns)
+        self.exclude_paths = tuple(exclude_paths)
+        self.ledger = ledger
+        self.surface = surface
+
+
+def resolve_job_spec(*, dry_run, run_portable, run_system, run_custom, config,
+                     sys_targets=None, cli_excludes=(), cli_enable=(), cli_disable=(),
+                     surface="cli") -> JobSpec:
+    """Resolve every policy input ONCE into one immutable JobSpec (T-126).
+
+    Surface semantics (the ONLY place policy is reconstructed):
+      "gui"/"background"/"scheduled" - the FULL GUI target state (enable risky
+          AND disable safe deviations; foreground/preview/bg/schedule all
+          resolve to the identical mask).
+      "cli"      - SAFE defaults + explicit --sys-targets enables and
+                   --disable-targets disables. Plain --all never silently
+                   enables risky targets (P1-7).
+      "status"   - the same SAFE CLI policy (documented --status contract).
+    Saved exclude_patterns/exclude_paths ALWAYS apply on every surface.
+    """
+    cfg = copy.deepcopy(config)
+    if surface in ("gui", "background", "scheduled"):
+        mask = merged_system_targets(sys_targets if sys_targets is not None else cfg.get("system_targets"))
+    else:
+        mask = dict(SYSTEM_TARGET_DEFAULTS)
+        for name in cli_enable:
+            if name in SYSTEM_TARGET_DEFAULTS:
+                mask[name] = True
+        for name in cli_disable:
+            if name in SYSTEM_TARGET_DEFAULTS:
+                mask[name] = False
+    exclude_patterns, exclude_paths = _canonical_exclusions(
+        list(cfg.get("exclude_patterns", [])) + list(cli_excludes),
+        cfg.get("exclude_paths", []))
+    return JobSpec(dry_run=dry_run, run_portable=run_portable, run_system=run_system,
+                   run_custom=run_custom, config=cfg, sys_targets=mask,
+                   exclude_patterns=exclude_patterns, exclude_paths=exclude_paths,
+                   ledger=CandidateLedger(), surface=surface)
+
+
+def run_cleaning_job(spec, log, cancel_event=None, progress=None):
+    """Execute (or, when spec.dry_run, plan) one job from a resolved JobSpec.
+
+    Consumes ONLY the immutable spec (T-126): frozen config snapshot, resolved
+    exclusions, resolved system-target mask and the job-shared CandidateLedger.
+    Never reloads config, never re-resolves policy.
+
+    Returns a results dict with the per-layer planned/freed bytes and the
+    per-target system results -- the single source of truth shared by dry-run,
+    --status and the GUI preview/progress estimation (F4/T-114).
+    """
+    cfg = spec.config
+    exclude_patterns = list(spec.exclude_patterns)
+    exclude_paths = list(spec.exclude_paths)
+    dry_run = spec.dry_run
+    max_threads = DEFAULT_THREADS
     results: dict = {}
     log.header(f"Smart VAC Cleaner v{VERSION} | {'DRY-RUN' if dry_run else 'DELETE MODE'} | {datetime.now().astimezone()}")
     if dry_run: log.info('[DRY-RUN] Nothing will be deleted.')
     else: log.info('[WARNING] DELETE MODE active!')
-    if run_portable:
+    if spec.run_portable:
         roots = [Path(r) for r in cfg.get('portable_roots', []) if Path(r).exists()]
         if not roots:
             log.info('No portable roots configured (see cleaner_config.json) - skipped.')
@@ -2984,23 +3268,23 @@ def run_cleaning_job(dry_run, run_portable, run_system, run_custom, log, max_thr
         portable_freed = 0
         for r in roots:
             if cancel_event and cancel_event.is_set(): raise CancelJobException('Cancelled')
-            portable_freed += PortableCleaner(dry_run, log, SafetyGuard(r), r, max_threads, cancel_event, exclude_patterns=exclude_patterns, exclude_paths=exclude_paths, progress=progress).run_all()
+            portable_freed += PortableCleaner(dry_run, log, SafetyGuard(r), r, max_threads, cancel_event, exclude_patterns=exclude_patterns, exclude_paths=exclude_paths, progress=progress, ledger=spec.ledger).run_all()
         if progress: progress.finish_category(total_bytes=portable_freed)
         results['portable'] = portable_freed
-    if run_system:
+    if spec.run_system:
         if cancel_event and cancel_event.is_set(): raise CancelJobException('Cancelled')
         if progress: progress.start_category('System')
-        sc = SystemCleaner(dry_run, log, max_threads, sys_targets, cancel_event, exclude_patterns=exclude_patterns, exclude_paths=exclude_paths, progress=progress)
+        sc = SystemCleaner(dry_run, log, max_threads, spec.sys_targets, cancel_event, exclude_patterns=exclude_patterns, exclude_paths=exclude_paths, progress=progress, ledger=spec.ledger)
         system_freed = sc.run_all()
         results['system'] = dict(sc.results)
         results['system_bytes'] = system_freed
         if progress: progress.finish_category(total_bytes=system_freed)
-    if run_custom:
+    if spec.run_custom:
         if cancel_event and cancel_event.is_set(): raise CancelJobException('Cancelled')
         rules = cfg.get('custom_rules', [])
         if rules:
             if progress: progress.start_category('Custom')
-            custom_freed = CustomCleaner(dry_run, log, rules, max_threads, cancel_event, exclude_patterns=exclude_patterns, exclude_paths=exclude_paths, progress=progress).run_all()
+            custom_freed = CustomCleaner(dry_run, log, rules, max_threads, cancel_event, exclude_patterns=exclude_patterns, exclude_paths=exclude_paths, progress=progress, ledger=spec.ledger).run_all()
             if progress: progress.finish_category(total_bytes=custom_freed)
         else:
             custom_freed = 0
@@ -3009,18 +3293,22 @@ def run_cleaning_job(dry_run, run_portable, run_system, run_custom, log, max_thr
     return results
 
 def cli_status():
-    """--status: planned bytes from the SAME read-only planner as dry-run (F4).
+    """--status: planned bytes from the SAME read-only planner as dry-run (F4/T-127).
 
-    Runs the shared dry-run planner on a single config snapshot and reports the
-    per-target system results plus portable/custom totals. The candidate truth
-    is identical to a dry-run for the same snapshot/config.
+    Resolves ONE JobSpec with the documented status policy:
+      - SAFE CLI system-target mask (no config prefs, no explicit targets)
+      - saved exclude_patterns/exclude_paths DO apply
+    and runs the shared dry-run planner. The candidate truth is identical to a
+    dry-run for the same snapshot/config.
     """
     config = load_config()
+    spec = resolve_job_spec(dry_run=True, run_portable=True, run_system=True, run_custom=True,
+                            config=config, surface="status")
     print(f"Smart VAC Cleaner v{VERSION}")
     print(f"Config: {CONFIG_FILE}")
     print(f"Custom rules: {len(config.get('custom_rules', []))}")
     quiet = Logger(log_file=None, dry_run=True, quiet=True)
-    results = run_cleaning_job(True, True, True, True, quiet, config=config)
+    results = run_cleaning_job(spec, quiet)
     sizes = results.get("system", {})
     print('System targets:')
 
@@ -3204,7 +3492,11 @@ class App(ctk.CTk):
         self.text_log.configure(state="disabled")
         self.progress = ProgressTracker()
         self._job_done_event.clear()
-        self._worker_thread = threading.Thread(target=self._run_job, daemon=True)
+        # T-128: freeze the job spec on the Tk thread BEFORE the worker starts.
+        # The worker reads ONLY this spec, never the mutable GUI state.
+        spec = resolve_job_spec(dry_run=False, run_portable=True, run_system=True, run_custom=True,
+                                config=self.config, sys_targets=self.sys_targets, surface="gui")
+        self._worker_thread = threading.Thread(target=self._run_job, args=(spec,), daemon=True)
         self._worker_thread.start()
 
     def _start_preview(self):
@@ -3225,19 +3517,18 @@ class App(ctk.CTk):
         self.text_log.configure(state="disabled")
         self.progress = ProgressTracker()
         self._job_done_event.clear()
-        self._worker_thread = threading.Thread(target=self._run_job, kwargs={"dry_run": True}, daemon=True)
+        # T-128: freeze the job spec before the worker starts (same gui surface).
+        spec = resolve_job_spec(dry_run=True, run_portable=True, run_system=True, run_custom=True,
+                                config=self.config, sys_targets=self.sys_targets, surface="gui")
+        self._worker_thread = threading.Thread(target=self._run_job, args=(spec,), daemon=True)
         self._worker_thread.start()
 
-    def _run_job(self, dry_run=False):
+    def _run_job(self, spec):
         try:
-            log = Logger(BASE_DIR/"logs"/f"clean_{datetime.now().astimezone():%Y%m%d_%H%M%S}.log", dry_run, gui_callback=self._log)
-            # Safe defaults: risky opt-in targets stay off unless the user
-            # enabled them via the System Targets dialog (P1-7).
-            all_targets = dict(self.sys_targets)
-            # F5: freeze the config snapshot once per job; mutable GUI edits
-            # apply to the NEXT job only, never mid-job.
-            config_snapshot = copy.deepcopy(self.config)
-            run_cleaning_job(dry_run, True, True, True, log, DEFAULT_THREADS, all_targets, self.cancel_event, progress=self.progress, exclude_patterns=config_snapshot.get('exclude_patterns'), exclude_paths=config_snapshot.get('exclude_paths'), config=config_snapshot)
+            log = Logger(BASE_DIR/"logs"/f"clean_{datetime.now().astimezone():%Y%m%d_%H%M%S}.log", spec.dry_run, gui_callback=self._log)
+            # T-126/T-128: the worker consumes ONLY the frozen JobSpec. It never
+            # reads self.config / self.sys_targets after start.
+            run_cleaning_job(spec, log, cancel_event=self.cancel_event, progress=self.progress)
         except CancelJobException:
             self._log(self.T["cancelled"])
         except Exception as e:
@@ -3401,7 +3692,7 @@ class App(ctk.CTk):
             hh, mm = start.split(":")
             if not (0 <= int(hh) < 24 and 0 <= int(mm) < 60):
                 return
-            install_task(f"{int(hh):02d}:{int(mm):02d}", enabled_risky_targets(self.sys_targets))
+            install_task(f"{int(hh):02d}:{int(mm):02d}", self.sys_targets)
         except Exception as e:
             logging.getLogger("vac_cleaner").warning(f"Failed to install scheduled task: {e}")
 
@@ -3414,7 +3705,7 @@ class App(ctk.CTk):
             flags |= getattr(subprocess, f, 0)
         try:
             self._bg_proc = subprocess.Popen(
-                background_clean_argv(enabled_risky_targets(self.sys_targets)),
+                background_clean_argv(self.sys_targets),
                 cwd=str(BASE_DIR),
                 close_fds=True,
                 creationflags=flags,
@@ -3545,27 +3836,57 @@ def enabled_risky_targets(sys_targets) -> list[str]:
 
     Safe targets (on by default) are already carried by --all; only the risky
     opt-ins (Recycle Bin / DNS / Windows Update) need an explicit --sys-targets
-    in scheduled/background argv (T-106).
+    in scheduled/background argv (T-106). Kept for the plain-CLI P1-7 surface;
+    one implementation of the deviation logic (T-129, G).
     """
-    return [name for name, val in (sys_targets or {}).items()
-            if val and not SYSTEM_TARGET_DEFAULTS.get(name)]
+    return _target_deviations(sys_targets)[0]
+
+
+def _target_deviations(sys_targets) -> tuple[list[str], list[str]]:
+    """T-129: FULL deviation from the safe defaults, both directions.
+
+    Returns (enables, disables): risky targets switched ON and safe targets
+    switched OFF. Scheduling/background argv must carry BOTH, otherwise a
+    disabled safe default (e.g. System Temp off) is silently re-enabled by
+    --all. Unknown names are dropped (fail closed, same as config load).
+    """
+    enables: list[str] = []
+    disables: list[str] = []
+    for name, val in (sys_targets or {}).items():
+        if name not in SYSTEM_TARGET_DEFAULTS:
+            continue
+        if val and not SYSTEM_TARGET_DEFAULTS[name]:
+            enables.append(name)
+        elif not val and SYSTEM_TARGET_DEFAULTS[name]:
+            disables.append(name)
+    return enables, disables
+
+
+def disabled_safe_targets(sys_targets) -> list[str]:
+    """Safe-default targets the user switched OFF (serialized as --disable-targets)."""
+    return _target_deviations(sys_targets)[1]
 
 
 def clean_argv(sys_targets=None) -> list[str]:
     """Canonical argv for a silent full-clean (scheduled + background share this, T-067).
 
-    --all here means portable+system+custom with SAFE system-target defaults;
-    the risky opt-in targets (Recycle Bin, DNS, Windows Update) stay off unless
-    enabled explicitly via --sys-targets. `sys_targets` is a list of target
-    names to enable (T-106): only risky opt-ins make sense to pass, since the
-    safe defaults are already on via --all.
+    --all here means portable+system+custom with SAFE system-target defaults.
+    `sys_targets` is the FULL target mask (dict or mapping): every deviation
+    from the safe defaults is serialized -- risky targets enabled via
+    --sys-targets AND safe targets disabled via --disable-targets (T-129), so a
+    GUI state that turns System Temp off survives a scheduled/background run.
+    Public plain --all semantics stay unchanged: with no mask, the safe
+    defaults apply untouched.
     """
     if getattr(sys, "frozen", False):
         argv = [sys.executable, "--cli", "--all", "--delete", "--hidden"]
     else:
         argv = [_get_pythonw(), str(SCRIPT_PATH), "--cli", "--all", "--delete", "--hidden"]
-    if sys_targets:
-        argv += ["--sys-targets", ",".join(sys_targets)]
+    enables, disables = _target_deviations(sys_targets)
+    if enables:
+        argv += ["--sys-targets", ",".join(enables)]
+    if disables:
+        argv += ["--disable-targets", ",".join(disables)]
     return argv
 
 
@@ -3617,6 +3938,8 @@ def main():
     parser.add_argument("--hidden",   action="store_true", default=False,
                         help="Hide console window (used when launched by Task Scheduler)")
     parser.add_argument("--sys-targets", type=str, default="")
+    parser.add_argument("--disable-targets", type=str, default="",
+                        help="Comma-separated safe-default targets to switch OFF (internal scheduled/background surface, T-129)")
     parser.add_argument("--exclude",     type=str, default="")
     parser.add_argument("--install-task", action="store_true",
                         help="Register daily Task Scheduler job")
@@ -3627,11 +3950,17 @@ def main():
     # ── install-task ──────────────────────────────────────────────────────────
     if args.install_task:
         targets = [t.strip() for t in args.sys_targets.split(",") if t.strip()]
-        for t in targets:
+        disables = [t.strip() for t in args.disable_targets.split(",") if t.strip()]
+        for t in targets + disables:
             if t not in SYSTEM_TARGET_DEFAULTS:
                 print(f"Error: unknown system target '{t}'. Known: {', '.join(SYSTEM_TARGET_DEFAULTS)}")
                 sys.exit(2)
-        sys.exit(0 if install_task(args.time, targets or None) else 1)
+        mask = dict(SYSTEM_TARGET_DEFAULTS)
+        for t in targets:
+            mask[t] = True
+        for t in disables:
+            mask[t] = False
+        sys.exit(0 if install_task(args.time, mask) else 1)
 
     # ── status ────────────────────────────────────────────────────────────────
     if args.status:
@@ -3654,31 +3983,30 @@ def main():
         rp = args.portable or args.all
         rs = args.system or args.all
         rc = args.custom or args.all
-        # --all / scheduled / background NEVER enable risky opt-in targets;
-        # they use the safe SYSTEM_TARGET_DEFAULTS (P1-7).
-        st = dict(SYSTEM_TARGET_DEFAULTS)
-        if args.sys_targets:
-            for t in args.sys_targets.split(","):
-                name = t.strip()
-                if not name:
-                    continue
-                if name not in SYSTEM_TARGET_DEFAULTS:
-                    print(f"Error: unknown system target '{name}'. Known: {', '.join(SYSTEM_TARGET_DEFAULTS)}")
-                    sys.exit(2)
-                st[name] = True
+        enables = []
+        disables = []
+        for t in [x.strip() for x in args.sys_targets.split(",") if x.strip()]:
+            if t not in SYSTEM_TARGET_DEFAULTS:
+                print(f"Error: unknown system target '{t}'. Known: {', '.join(SYSTEM_TARGET_DEFAULTS)}")
+                sys.exit(2)
+            enables.append(t)
+        for t in [x.strip() for x in args.disable_targets.split(",") if x.strip()]:
+            if t not in SYSTEM_TARGET_DEFAULTS:
+                print(f"Error: unknown system target '{t}'. Known: {', '.join(SYSTEM_TARGET_DEFAULTS)}")
+                sys.exit(2)
+            disables.append(t)
         ep = [p.strip() for p in args.exclude.split(",") if p.strip()]
+        # T-126: resolve the ENTIRE job policy ONCE; the planner consumes only
+        # this spec. Plain --all keeps the safe P1-7 defaults; explicit
+        # --sys-targets / --disable-targets are the only deviations.
+        spec = resolve_job_spec(dry_run=dry_run, run_portable=rp, run_system=rs, run_custom=rc,
+                                config=config, cli_excludes=ep,
+                                cli_enable=enables, cli_disable=disables, surface="cli")
         log = Logger(
             BASE_DIR / "logs" / f"clean_{datetime.now().astimezone():%Y%m%d_%H%M%S}.log",
             dry_run
         )
-        run_cleaning_job(
-            dry_run, rp, rs, rc, log,
-            max_threads=DEFAULT_THREADS,
-            sys_targets=st,
-            exclude_patterns=config.get("exclude_patterns", []) + ep,
-            exclude_paths=config.get("exclude_paths", []),
-            config=config
-        )
+        run_cleaning_job(spec, log)
         return
 
     # ── GUI mode ────────────────────────────────────────────────────────────────

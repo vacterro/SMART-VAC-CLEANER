@@ -47,7 +47,9 @@ Every path is normalized the moment the config is read:
 - duplicate roots collapse to one canonical entry
 - roots nested inside another configured root are rejected with a warning
 - protected paths (blacklist: `C:\`, Windows, Program Files, user profile,
-  the cleaner's own folder) are rejected for roots and custom rules
+  the cleaner's own folder) are rejected for user roots and custom rules —
+  including every descendant; reviewed internal system targets are not user
+  roots and keep their own scoped per-target SafetyGuard root
 
 User config values survive upgrades; a legacy `profiles` key is dropped
 automatically. The GUI **Exclusions** button edits `exclude_patterns` and

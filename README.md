@@ -23,7 +23,7 @@ Missing drives are silently skipped, never errors.
 ## Safety (defense in depth)
 
 - **Dry-run is physically read-only** — GUI "Clean" is real delete (with a confirm dialog), the CLI needs `--delete` explicitly; a dry-run plans but never mutates (no unlink/chmod/rmdir, no DNS flush, no service stop, no recycle-bin call)
-- **Blacklist**: `C:\`, `C:\Windows`, `USERPROFILE`, Program Files, the script's own folder — a protected root and every descendant under it is never touched, even by custom rules
+- **Blacklist**: `C:\`, `C:\Windows`, `USERPROFILE`, Program Files, the script's own folder — these are refused as **user-supplied** roots (portable/custom): no user root may equal a protected root or be a descendant of one, even if the config asks for it. Reviewed internal system targets (System Temp, AppData caches, …) are not user roots: they carry their own explicitly scoped capability and stay confined to their own per-target SafetyGuard root
 - **No hardcoded portable roots**: fresh config defaults to `portable_roots: []`
 - **Min path depth**: shallow paths (fewer than 5 parts) are refused
 - **Running-process check**: apps using a target are skipped (per-app process lists); if the process table can't be queried, app-sensitive targets are skipped too (fail closed); the snapshot is refreshed before each destructive app group

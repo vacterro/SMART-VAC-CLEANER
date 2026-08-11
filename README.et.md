@@ -21,7 +21,7 @@ Puuduvad kettad jäetakse vaikselt vahele, vigu ei teki kunagi.
 ## Ohutus (kaitse sügavuti)
 
 - **Dry-run vaikimisi** — GUI nupp "Puhasta" kustutab päriselt (küsib eelnevalt kinnitust), CLI nõuab selgesõnalist `--delete`
-- **Must nimekiri**: `C:\`, `C:\Windows`, kasutajaprofiil, Program Files, programmi enda kaust — ei puudutata kunagi, isegi reeglitega
+- **Must nimekiri**: `C:\`, `C:\Windows`, kasutajaprofiil, Program Files, programmi enda kaust — kasutaja-antud (portable/custom) juur ei tohi kunagi olla kaitstud tee ega selle alamkaust; sisemised ülevaadatud süsteemi sihtmärgid on eraldi ulatusega ja piirduvad oma SafetyGuard juuriga
 - **Minimaalne tee sügavus**: madalad teed (vähem kui 5 komponenti) lükatakse tagasi
 - **Käivate protsesside kontroll**: rakendus, mis sihtmärki kasutab, jäetakse vahele
 - **Sümbollingid ja `..` lükatakse tagasi**

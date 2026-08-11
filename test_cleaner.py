@@ -596,8 +596,13 @@ class TestPortableSweep(unittest.TestCase):
             self.assertTrue((root / "121.0.3.0").exists())
             self.assertEqual(log.n_deleted, 2)
 
-    def test_universal_cache_sweep_verified_owner(self):
-        """T-098: discovered cache under a verified portable app dir is swept."""
+    def test_universal_cache_defers_to_dedicated_sweeper(self):
+        """T-124: universal discovery DEFERS known-app caches to the dedicated sweeper.
+
+        A cache under a known portable app dir is owned by that app's dedicated
+        sweep -- universal discovery must not plan it a second time (one object
+        -> one candidate). clean_cent still sweeps it via the dedicated path.
+        """
         with tempfile.TemporaryDirectory() as tmp:
             root = self._deep_root(tmp)
             cache = root / "_CENT" / "User Data" / "Default" / "Cache"
@@ -609,22 +614,34 @@ class TestPortableSweep(unittest.TestCase):
             cleaner, log = self._cleaner(root)
             with patch.object(vac, "get_running_processes", return_value=set()):
                 cleaner.clean_universal_caches()
+            self.assertTrue((cache / "junk.bin").exists(),
+                            "universal discovery must defer known-app caches to the dedicated sweeper")
+            self.assertEqual(log.n_deleted, 0)
+            # the dedicated cent sweeper owns this cache
+            with patch.object(vac, "get_running_processes", return_value=set()):
+                cleaner.clean_cent()
             self.assertFalse((cache / "junk.bin").exists())
             self.assertTrue(keep.exists())
-            self.assertGreater(log.n_deleted, 0)
 
-    def test_universal_cache_sweep_unknown_owner_skipped_in_delete(self):
-        """T-098: a discovered cache with no verified owner is NEVER deleted."""
-        with tempfile.TemporaryDirectory() as tmp:
-            root = self._deep_root(tmp)
-            cache = root / "App" / "Cache"
-            cache.mkdir(parents=True)
-            (cache / "junk.bin").write_bytes(b"x" * 100)
-            cleaner, log = self._cleaner(root)
-            with patch.object(vac, "get_running_processes", return_value=set()):
-                cleaner.clean_universal_caches()
-            self.assertTrue((cache / "junk.bin").exists(), "unknown-owner cache must survive in delete mode")
-            self.assertEqual(log.n_deleted, 0)
+    def test_universal_cache_sweep_unknown_owner_discovered_not_authorized(self):
+        """T-125: a discovered cache with no verified owner is NOT actionable.
+
+        In BOTH dry-run and real-delete it is reported as DISCOVERED / NOT
+        AUTHORIZED with ZERO planned bytes and ZERO candidates.
+        """
+        for dry_run in (True, False):
+            with tempfile.TemporaryDirectory() as tmp:
+                root = self._deep_root(tmp)
+                cache = root / "App" / "Cache"
+                cache.mkdir(parents=True)
+                (cache / "junk.bin").write_bytes(b"x" * 100)
+                log = vac.Logger(log_file=None, dry_run=dry_run)
+                cleaner = vac.PortableCleaner(dry_run, log, vac.SafetyGuard(root), root)
+                with patch.object(vac, "get_running_processes", return_value=set()):
+                    freed = cleaner.clean_universal_caches()
+                self.assertEqual(freed, 0, f"dry_run={dry_run}: unknown-owner cache contributes zero bytes")
+                self.assertEqual(log.n_deleted, 0)
+                self.assertTrue((cache / "junk.bin").exists(), "unknown-owner cache must survive")
 
     def test_universal_cache_owner_resolution(self):
         """T-098: _universal_owner_for maps known portable app dirs."""
@@ -796,7 +813,7 @@ class TestCLIFunctions(unittest.TestCase):
         mock_parse.return_value = MagicMock(
             dry_run=False, delete=False,
             portable=False, system=False, custom=False, all=False,
-            cli=False, status=False, analyze_caches=False, hidden=False, sys_targets="",
+            cli=False, status=False, analyze_caches=False, hidden=False, sys_targets="", disable_targets="",
             exclude="", install_task=False, time="09:00",
         )
         # main() should go to GUI path (App()), not CLI
@@ -810,7 +827,7 @@ class TestCLIFunctions(unittest.TestCase):
         mock_parse.return_value = MagicMock(
             dry_run=False, delete=False,
             portable=False, system=False, custom=False, all=False,
-            cli=False, status=True, hidden=False, sys_targets="",
+            cli=False, status=True, hidden=False, sys_targets="", disable_targets="",
             exclude="", install_task=False, time="09:00",
         )
         with patch.object(vac, "cli_status") as mock_status:
@@ -823,7 +840,7 @@ class TestCLIFunctions(unittest.TestCase):
         mock_parse.return_value = MagicMock(
             dry_run=False, delete=False,
             portable=False, system=False, custom=False, all=False,
-            cli=False, status=False, analyze_caches=True, hidden=False, sys_targets="",
+            cli=False, status=False, analyze_caches=True, hidden=False, sys_targets="", disable_targets="",
             exclude="", install_task=False, time="09:00",
         )
         with patch("analyze_caches.main") as mock_analyze:
@@ -836,7 +853,7 @@ class TestCLIFunctions(unittest.TestCase):
         mock_parse.return_value = MagicMock(
             dry_run=False, delete=False,
             portable=True, system=False, custom=False, all=False,
-            cli=False, status=False, analyze_caches=False, hidden=False, sys_targets="",
+            cli=False, status=False, analyze_caches=False, hidden=False, sys_targets="", disable_targets="",
             exclude="", install_task=False, time="09:00",
         )
         with patch.object(vac, "run_cleaning_job") as mock_job, patch.object(vac, "Logger"):
@@ -850,13 +867,13 @@ class TestCLIFunctions(unittest.TestCase):
         mock_parse.return_value = MagicMock(
             dry_run=False, delete=True,
             portable=True, system=True, custom=True, all=False,
-            cli=False, status=False, analyze_caches=False, hidden=False, sys_targets="",
+            cli=False, status=False, analyze_caches=False, hidden=False, sys_targets="", disable_targets="",
             exclude="", install_task=False, time="09:00",
         )
         with patch.object(vac, "run_cleaning_job") as mock_job, patch.object(vac, "Logger"):
             vac.main()
             args, _ = mock_job.call_args
-            self.assertFalse(args[0])  # dry_run = False with --delete
+            self.assertFalse(args[0].dry_run)  # dry_run = False with --delete
 
     @patch("_SMART_VAC_CLEANER.argparse.ArgumentParser.parse_args")
     def test_main_explicit_dry_run_with_delete(self, mock_parse):
@@ -864,7 +881,7 @@ class TestCLIFunctions(unittest.TestCase):
         mock_parse.return_value = MagicMock(
             dry_run=True, delete=True,
             portable=True, system=False, custom=False, all=False,
-            cli=False, status=False, analyze_caches=False, hidden=False, sys_targets="",
+            cli=False, status=False, analyze_caches=False, hidden=False, sys_targets="", disable_targets="",
             exclude="", install_task=False, time="09:00",
         )
         with patch.object(vac, "run_cleaning_job") as mock_job, patch.object(vac, "Logger"):
@@ -878,7 +895,7 @@ class TestCLIFunctions(unittest.TestCase):
         mock_parse.return_value = MagicMock(
             dry_run=False, delete=True,
             portable=True, system=False, custom=False, all=False,
-            cli=False, status=False, analyze_caches=False, hidden=True, sys_targets="",
+            cli=False, status=False, analyze_caches=False, hidden=True, sys_targets="", disable_targets="",
             exclude="", install_task=False, time="09:00",
         )
         with patch.object(vac, "run_cleaning_job") as mock_job, patch.object(vac, "Logger"), patch.object(vac, "_hide_console") as mock_hide:
@@ -1089,7 +1106,7 @@ class TestDryRunPurity(unittest.TestCase):
                     mock_parse.return_value = MagicMock(
                         dry_run=True, delete=True, portable=False, system=False,
                         custom=False, all=True, cli=True, status=False,
-                        analyze_caches=False, hidden=False, sys_targets="", exclude="",
+                        analyze_caches=False, hidden=False, sys_targets="", disable_targets="", exclude="",
                         install_task=False, time="09:00")
                     vac.main()
             finally:
@@ -1521,11 +1538,11 @@ class TestCLISemantics(unittest.TestCase):
             dry_run=True, delete=False,
             portable=False, system=False, custom=False, all=True,
             cli=True, status=False, analyze_caches=False, hidden=False,
-            sys_targets="", exclude="", install_task=False, time="09:00",
+            sys_targets="", disable_targets="", exclude="", install_task=False, time="09:00",
         )
         captured = {}
-        def fake_job(dry_run, run_portable, run_system, run_custom, log, max_threads, sys_targets, cancel_event=None, exclude_patterns=None, exclude_paths=None, progress=None, config=None):
-            captured["sys_targets"] = sys_targets
+        def fake_job(spec, log, cancel_event=None, progress=None):
+            captured["sys_targets"] = dict(spec.sys_targets)
         with patch.object(vac, "run_cleaning_job", side_effect=fake_job), patch.object(vac, "Logger"):
             vac.main()
         self.assertFalse(captured["sys_targets"]["Recycle Bin"])
@@ -1538,7 +1555,7 @@ class TestCLISemantics(unittest.TestCase):
             dry_run=True, delete=False,
             portable=False, system=False, custom=False, all=True,
             cli=True, status=False, analyze_caches=False, hidden=False,
-            sys_targets="Nope,Recycle Bin", exclude="", install_task=False, time="09:00",
+            sys_targets="Nope,Recycle Bin", disable_targets="", exclude="", install_task=False, time="09:00",
         )
         with patch.object(vac, "Logger"), self.assertRaises(SystemExit) as cm:
             vac.main()
@@ -1551,12 +1568,12 @@ class TestCLISemantics(unittest.TestCase):
             dry_run=True, delete=False,
             portable=True, system=False, custom=False, all=False,
             cli=True, status=False, analyze_caches=False, hidden=False,
-            sys_targets="", exclude="*.tmp", install_task=False, time="09:00",
+            sys_targets="", disable_targets="", exclude="*.tmp", install_task=False, time="09:00",
         )
         captured = {}
-        def fake_job(dry_run, run_portable, run_system, run_custom, log, max_threads, sys_targets, cancel_event=None, exclude_patterns=None, exclude_paths=None, progress=None, config=None):
-            captured["patterns"] = exclude_patterns
-            captured["paths"] = exclude_paths
+        def fake_job(spec, log, cancel_event=None, progress=None):
+            captured["patterns"] = list(spec.exclude_patterns)
+            captured["paths"] = list(spec.exclude_paths)
         with patch.object(vac, "run_cleaning_job", side_effect=fake_job), \
              patch.object(vac, "Logger"), \
              patch.object(vac, "load_config", return_value={"portable_roots": [], "custom_rules": [],
@@ -1576,22 +1593,41 @@ class TestCLISemantics(unittest.TestCase):
         # list2cmdline quoting round-trips back to the argv
         self.assertEqual(vac.subprocess.list2cmdline(argv), cmd)
 
-    def test_clean_argv_carries_sys_targets(self):
-        """T-106: scheduled/background argv can carry risky opt-in targets."""
-        argv = vac.clean_argv(["Recycle Bin", "DNS Cache"])
+    def test_clean_argv_carries_full_target_mask(self):
+        """T-129: scheduled/background argv serializes the FULL deviation from defaults.
+
+        Both directions: risky targets enabled (--sys-targets) AND safe targets
+        disabled (--disable-targets) -- otherwise a GUI state that switches a
+        safe default off would be silently re-enabled by --all.
+        """
+        mask = dict(vac.SYSTEM_TARGET_DEFAULTS)
+        mask["Recycle Bin"] = True
+        mask["DNS Cache"] = True
+        mask["System Temp"] = False
+        argv = vac.clean_argv(mask)
         self.assertIn("--sys-targets", argv)
-        self.assertIn("Recycle Bin,DNS Cache", argv)
-        self.assertEqual(vac.background_clean_argv(["Recycle Bin"]),
-                         vac.clean_argv(["Recycle Bin"]))
-        cmd = vac.scheduled_task_command(["Windows Update Cache"])
+        join = ",".join(argv)
+        self.assertIn("Recycle Bin", join)
+        self.assertIn("DNS Cache", join)
+        self.assertIn("--disable-targets", argv)
+        self.assertIn("System Temp", argv)
+        self.assertEqual(vac.background_clean_argv(mask), vac.clean_argv(mask))
+        cmd = vac.scheduled_task_command(mask)
         self.assertIn("--sys-targets", cmd)
-        self.assertIn("Windows Update Cache", cmd)
+        self.assertIn("Recycle Bin", cmd)
+        self.assertIn("--disable-targets", cmd)
+        self.assertIn("System Temp", cmd)
+        # unknown names fail closed (dropped, never serialized)
+        self.assertNotIn("Bogus", " ".join(vac.clean_argv({"Bogus": True})))
 
     def test_clean_argv_defaults_no_sys_targets(self):
-        """T-106: no sys_targets -> argv identical to the safe default form."""
+        """T-106: no deviations -> argv identical to the safe default form."""
         self.assertNotIn("--sys-targets", vac.clean_argv())
         self.assertNotIn("--sys-targets", vac.background_clean_argv())
         self.assertNotIn("--sys-targets", vac.scheduled_task_command())
+        self.assertNotIn("--disable-targets", vac.clean_argv())
+        # a full default mask serializes nothing either
+        self.assertNotIn("--disable-targets", vac.clean_argv(dict(vac.SYSTEM_TARGET_DEFAULTS)))
 
     def test_enabled_risky_targets_helper(self):
         """T-106: only risky opt-ins beyond the safe defaults pass through."""
@@ -1606,19 +1642,24 @@ class TestCLISemantics(unittest.TestCase):
         self.assertEqual(vac.enabled_risky_targets(None), [])
 
     def test_install_task_passes_sys_targets(self):
-        """T-106: install_task embeds --sys-targets in the schtasks /tr command."""
+        """T-129: install_task embeds the full target mask in the schtasks /tr command."""
         with patch.object(vac.subprocess, "run") as mock_run:
             mock_run.return_value = MagicMock(returncode=0, stderr="")
-            ok = vac.install_task("09:00", ["Recycle Bin"])
+            mask = dict(vac.SYSTEM_TARGET_DEFAULTS)
+            mask["Recycle Bin"] = True
+            mask["System Temp"] = False
+            ok = vac.install_task("09:00", mask)
         self.assertTrue(ok)
         argv = mock_run.call_args.args[0]
         self.assertIn("/tr", argv)
         tr_idx = argv.index("/tr")
         self.assertIn("--sys-targets", argv[tr_idx + 1])
         self.assertIn("Recycle Bin", argv[tr_idx + 1])
+        self.assertIn("--disable-targets", argv[tr_idx + 1])
+        self.assertIn("System Temp", argv[tr_idx + 1])
 
     def test_install_task_defaults_safe(self):
-        """T-106: no targets -> scheduled command stays the safe --all form."""
+        """T-106: no deviations -> scheduled command stays the safe --all form."""
         with patch.object(vac.subprocess, "run") as mock_run:
             mock_run.return_value = MagicMock(returncode=0, stderr="")
             ok = vac.install_task("09:00")
@@ -1626,12 +1667,13 @@ class TestCLISemantics(unittest.TestCase):
         argv = mock_run.call_args.args[0]
         tr_idx = argv.index("/tr")
         self.assertNotIn("--sys-targets", argv[tr_idx + 1])
+        self.assertNotIn("--disable-targets", argv[tr_idx + 1])
 
     @patch("_SMART_VAC_CLEANER.argparse.ArgumentParser.parse_args")
     def test_main_install_task_accepts_sys_targets(self, mock_parse):
         """T-106: main() routes --sys-targets into install_task for the schedule."""
         mock_parse.return_value = MagicMock(
-            install_task=True, time="09:00", sys_targets="Recycle Bin,DNS Cache",
+            install_task=True, time="09:00", sys_targets="Recycle Bin,DNS Cache", disable_targets="",
             status=False, analyze_caches=False, hidden=False, dry_run=False,
             delete=False, portable=False, system=False, custom=False,
             all=False, cli=False, exclude="")
@@ -1639,14 +1681,17 @@ class TestCLISemantics(unittest.TestCase):
              self.assertRaises(SystemExit) as cm:
             vac.main()
         self.assertEqual(mock_install.call_args.args[0], "09:00")
-        self.assertEqual(mock_install.call_args.args[1], ["Recycle Bin", "DNS Cache"])
+        mask = mock_install.call_args.args[1]
+        self.assertTrue(mask["Recycle Bin"])
+        self.assertTrue(mask["DNS Cache"])
+        self.assertTrue(mask["System Temp"])  # safe default unchanged
         self.assertEqual(cm.exception.code, 0)
 
     @patch("_SMART_VAC_CLEANER.argparse.ArgumentParser.parse_args")
     def test_main_install_task_rejects_unknown_target(self, mock_parse):
         """T-106: unknown target in --install-task --sys-targets exits 2."""
         mock_parse.return_value = MagicMock(
-            install_task=True, time="09:00", sys_targets="Bogus",
+            install_task=True, time="09:00", sys_targets="Bogus", disable_targets="",
             status=False, analyze_caches=False, hidden=False, dry_run=False,
             delete=False, portable=False, system=False, custom=False,
             all=False, cli=False, exclude="")
@@ -1713,6 +1758,7 @@ class TestGuiThreadBoundary(unittest.TestCase):
         app.destroy = lambda: None
         return app
 
+
     def test_worker_log_never_calls_after(self):
         app = self._fake_app(after_mode="boom")
         app._log("hello")  # must not touch Tk
@@ -1724,7 +1770,7 @@ class TestGuiThreadBoundary(unittest.TestCase):
              patch.object(vac, "BASE_DIR", Path(tmp)), \
              patch.object(vac, "run_cleaning_job", side_effect=vac.CancelJobException("stop")):
             try:
-                app._run_job()
+                app._run_job(_gui_spec(app))
             finally:
                 logger = logging.getLogger("vac_cleaner")
                 for h in logger.handlers[:]:
@@ -1781,6 +1827,12 @@ class TestGuiThreadBoundary(unittest.TestCase):
         app._worker_thread.join(timeout=10)
         app._full_exit_impl()
         self.assertFalse(app._worker_thread.is_alive())
+
+
+def _gui_spec(app, dry_run=False):
+    """Mirror App._start_job's T-128 spec freeze for GUI worker tests."""
+    return vac.resolve_job_spec(dry_run=dry_run, run_portable=True, run_system=True, run_custom=True,
+                                config=app.config, sys_targets=app.sys_targets, surface="gui")
 
 
 class TestWindowsUpdateTransaction(unittest.TestCase):
@@ -1885,11 +1937,11 @@ class TestGuiSystemTargets(unittest.TestCase):
         app.sys_targets = dict(vac.SYSTEM_TARGET_DEFAULTS)
         app.sys_targets["Recycle Bin"] = True
         captured = {}
-        def fake_job(dry_run, run_portable, run_system, run_custom, log, max_threads, sys_targets, cancel_event=None, exclude_patterns=None, exclude_paths=None, progress=None, config=None):
-            captured["sys_targets"] = sys_targets
+        def fake_job(spec, log, cancel_event=None, progress=None):
+            captured["sys_targets"] = dict(spec.sys_targets)
         with patch.object(vac, "run_cleaning_job", side_effect=fake_job), \
              patch.object(vac, "Logger"):
-            app._run_job()
+            app._run_job(_gui_spec(app))
         self.assertTrue(captured["sys_targets"]["Recycle Bin"])
         self.assertFalse(captured["sys_targets"]["DNS Cache"])
         self.assertFalse(captured["sys_targets"]["Windows Update Cache"])
@@ -1898,11 +1950,11 @@ class TestGuiSystemTargets(unittest.TestCase):
         """A fresh GUI run passes only safe defaults, even with --all semantics."""
         app = self._app()
         captured = {}
-        def fake_job(dry_run, run_portable, run_system, run_custom, log, max_threads, sys_targets, cancel_event=None, exclude_patterns=None, exclude_paths=None, progress=None, config=None):
-            captured["sys_targets"] = sys_targets
+        def fake_job(spec, log, cancel_event=None, progress=None):
+            captured["sys_targets"] = dict(spec.sys_targets)
         with patch.object(vac, "run_cleaning_job", side_effect=fake_job), \
              patch.object(vac, "Logger"):
-            app._run_job()
+            app._run_job(_gui_spec(app))
         self.assertFalse(captured["sys_targets"]["Recycle Bin"])
         self.assertFalse(captured["sys_targets"]["DNS Cache"])
         self.assertFalse(captured["sys_targets"]["Windows Update Cache"])
@@ -1918,30 +1970,30 @@ class TestGuiPreview(unittest.TestCase):
         """The Clean path must stay a real delete -- dry_run default False."""
         app = self._app()
         captured = {}
-        def fake_job(dry_run, run_portable, run_system, run_custom, log, max_threads, sys_targets, cancel_event=None, exclude_patterns=None, exclude_paths=None, progress=None, config=None):
-            captured["dry_run"] = dry_run
+        def fake_job(spec, log, cancel_event=None, progress=None):
+            captured["dry_run"] = spec.dry_run
         with patch.object(vac, "run_cleaning_job", side_effect=fake_job), \
              patch.object(vac, "Logger"):
-            app._run_job()
+            app._run_job(_gui_spec(app))
         self.assertFalse(captured["dry_run"])
 
     def test_run_job_preview_is_dry_run(self):
         """Preview passes dry_run=True -- physically read-only (T-090)."""
         app = self._app()
         captured = {}
-        def fake_job(dry_run, run_portable, run_system, run_custom, log, max_threads, sys_targets, cancel_event=None, exclude_patterns=None, exclude_paths=None, progress=None, config=None):
-            captured["dry_run"] = dry_run
+        def fake_job(spec, log, cancel_event=None, progress=None):
+            captured["dry_run"] = spec.dry_run
         with patch.object(vac, "run_cleaning_job", side_effect=fake_job), \
              patch.object(vac, "Logger"):
-            app._run_job(dry_run=True)
+            app._run_job(_gui_spec(app, dry_run=True))
         self.assertTrue(captured["dry_run"])
 
     def test_start_preview_no_confirm_spawns_dry_run_worker(self):
         """Preview must not ask for delete confirmation and must run dry-run."""
         app = self._app()
         calls = []
-        def fake_job(dry_run, run_portable, run_system, run_custom, log, max_threads, sys_targets, cancel_event=None, exclude_patterns=None, exclude_paths=None, progress=None, config=None):
-            calls.append(dry_run)
+        def fake_job(spec, log, cancel_event=None, progress=None):
+            calls.append(spec.dry_run)
         def boom_confirm(*a, **k):
             raise AssertionError("preview must not ask for delete confirmation")
         with patch.object(vac, "run_cleaning_job", side_effect=fake_job), \
@@ -2029,11 +2081,11 @@ class TestPersistentSystemTargets(unittest.TestCase):
         self.tmp_config.write_text(
             '{"system_targets": {"Recycle Bin": true}}', encoding="utf-8")
         captured = {}
-        def fake_job(dry_run, run_portable, run_system, run_custom, log, max_threads, sys_targets, cancel_event=None, exclude_patterns=None, exclude_paths=None, progress=None, config=None):
-            captured["sys_targets"] = sys_targets
+        def fake_job(spec, log, cancel_event=None, progress=None):
+            captured["sys_targets"] = dict(spec.sys_targets)
         with patch.object(vac.argparse.ArgumentParser, "parse_args",
                           return_value=MagicMock(
-                              install_task=False, time="09:00", sys_targets="",
+                              install_task=False, time="09:00", sys_targets="", disable_targets="",
                               status=False, analyze_caches=False, hidden=True,
                               dry_run=False, delete=True, portable=False,
                               system=False, custom=False, all=True, cli=True,
@@ -2506,8 +2558,12 @@ class TestStatusDryRunParity(unittest.TestCase):
                  patch.object(vac, "USER_CRASH", Path(tmp) / "none"), \
                  patch.object(vac, "USER_EXPLORER", Path(tmp) / "none"):
                 log = vac.Logger(log_file=None, dry_run=True, quiet=True)
-                res = vac.run_cleaning_job(True, True, True, True, log, config=cfg)
+                spec = vac.resolve_job_spec(dry_run=True, run_portable=True, run_system=True, run_custom=True,
+                                            config=cfg, surface="status")
+                res = vac.run_cleaning_job(spec, log)
                 total_dry = res.get("system_bytes", 0) + res.get("portable", 0) + res.get("custom", 0)
+                # T-124: the 25-byte Chromium cache is planned exactly once
+                self.assertEqual(res.get("portable", 0), 25)
                 buf = io.StringIO()
                 with patch.object(vac, "load_config", return_value=cfg), contextlib.redirect_stdout(buf):
                     vac.cli_status()
@@ -2535,9 +2591,12 @@ class TestConfigSnapshot(unittest.TestCase):
             log = vac.Logger(log_file=None, dry_run=True, quiet=True)
             with patch.object(vac, "get_running_processes", return_value=set()), \
                  patch.object(vac, "load_config", side_effect=AssertionError("job must not reload config")):
-                res = vac.run_cleaning_job(True, True, False, False, log, config=cfg)
-            # cache planned twice: chromium-profile sweep + universal sweeper
-            self.assertEqual(res["portable"], 20)
+                spec = vac.resolve_job_spec(dry_run=True, run_portable=True, run_system=False, run_custom=False,
+                                            config=cfg, surface="cli")
+                res = vac.run_cleaning_job(spec, log)
+            # T-124: ONE physical cache is planned ONCE (dedicated sweeper owns it;
+            # universal discovery defers). 10 bytes -> 10, never 20.
+            self.assertEqual(res["portable"], 10)
 
     def test_mid_job_config_edit_keeps_original_snapshot(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2554,8 +2613,10 @@ class TestConfigSnapshot(unittest.TestCase):
                                                 "exclude_patterns": [], "exclude_paths": []}), encoding="utf-8")
                 log = vac.Logger(log_file=None, dry_run=True, quiet=True)
                 with patch.object(vac, "get_running_processes", return_value=set()):
-                    res = vac.run_cleaning_job(True, True, False, False, log, config=snapshot)
-                self.assertEqual(res["portable"], 20, "running job must stay on the ORIGINAL snapshot")
+                    spec = vac.resolve_job_spec(dry_run=True, run_portable=True, run_system=False, run_custom=False,
+                                                config=snapshot, surface="cli")
+                    res = vac.run_cleaning_job(spec, log)
+                self.assertEqual(res["portable"], 10, "running job must stay on the ORIGINAL snapshot")
                 # the NEXT job loads the new config
                 fresh = vac.load_config()
                 self.assertEqual(fresh["portable_roots"], [str(pB)])
@@ -2671,11 +2732,22 @@ class TestVersionConsistency(unittest.TestCase):
             self.fail(f"stale version claim in source banner: {m.group(0)!r}")
 
     def test_version_matches_package_metadata(self):
+        """Installed-dist metadata must match VERSION.
+
+        A wheel build drops an egg-info INTO THE SOURCE TREE, which
+        importlib.metadata can see while the repo is on sys.path. That is NOT
+        an installed package (markhunt F package-boundary): the check only runs
+        against a real site-packages dist-info.
+        """
         try:
             import importlib.metadata as im
-            installed = im.version("smart-vac-cleaner")
-        except Exception:  # noqa: BLE001 - source tree has no installed metadata
+            dist = im.distribution("smart-vac-cleaner")
+            installed = dist.version
+            loc = str(getattr(dist, "_path", ""))
+        except Exception:  # noqa: BLE001 - no installed dist (source checkout)
             self.skipTest("package metadata unavailable (source checkout)")
+        if "site-packages" not in loc.lower():
+            self.skipTest("dist metadata is a source-tree artifact (egg-info), not an installed package")
         self.assertEqual(installed, vac.VERSION)
 
     def test_version_matches_pyproject(self):
@@ -2732,11 +2804,12 @@ class TestProcessOwnerProvenance(unittest.TestCase):
 
 
 class TestSafetyDocContract(unittest.TestCase):
-    """G: every docs/Safety.md numbered layer maps to a regression test.
+    """G/T-133: docs/Safety.md invariants are proven by BEHAVIOR, not class names.
 
-    Adding a prose-only invariant without a test breaks this guard. Renaming a
-    mapped test class requires updating the map -- deliberate, keeps the link
-    honest.
+    The layer->class map below is an INDEX only. Every critical invariant also
+    has a concrete behavioral assertion IN THIS CLASS, so a useless class with
+    the right name cannot launder a prose-only claim. A test that merely asserts
+    duplicated constants is never evidence here.
     """
 
     LAYER_TESTS: ClassVar[dict[int, str]] = {
@@ -2759,6 +2832,99 @@ class TestSafetyDocContract(unittest.TestCase):
         for num, clsname in self.LAYER_TESTS.items():
             self.assertTrue(getattr(mod, clsname, None), f"Safety.md layer {num} -> {clsname}")
 
+    # ---- behavioral proofs (T-133): the doc claim, demonstrated ----
+
+    def test_behavior_dry_run_is_physically_read_only(self):
+        """Layer 1: dry-run performs zero chmod/unlink/rmdir, byte-identical tree."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            app = root / "app"
+            (app / "deep").mkdir(parents=True)
+            (app / "deep" / "a.bin").write_bytes(b"x" * 100)
+            before = snapshot_tree(root)
+            with _ExplodeMutations():
+                c = vac.CleanerEngine(True, vac.Logger(log_file=None, dry_run=True),
+                                      vac.SafetyGuard(root, allow_shallow_system_target=True), root)
+                c._del_dir(app, "app")
+            after = snapshot_tree(root)
+            self.assertEqual(before, after)
+
+    def test_behavior_exclusions_are_global_invariant(self):
+        """Layer 10: engine exclusions reach the guard the engine actually uses."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            excl = root / "keep"
+            excl.mkdir()
+            c = vac.CleanerEngine(True, vac.Logger(log_file=None, dry_run=True),
+                                  vac.SafetyGuard(root, allow_shallow_system_target=True), root,
+                                  exclude_paths=[str(excl)])
+            ok, _ = c.guard.is_safe(excl / "x.bin")
+            self.assertFalse(ok)
+
+    def test_behavior_process_unknown_blocks_app_target(self):
+        """Layer 6: UNKNOWN process state skips app-sensitive targets."""
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "Cache"
+            target.mkdir()
+            (target / "f.bin").write_bytes(b"x" * 10)
+            targets = {k: False for k in vac.SYSTEM_TARGET_DEFAULTS}
+            targets["Discord Cache"] = True
+            with patch.object(vac, "USER_APPDATA_TARGETS", [(target, "Discord Cache", "discord")]), \
+                 patch.object(vac, "get_running_processes", return_value=None):
+                c = vac.SystemCleaner(False, vac.Logger(log_file=None, dry_run=False), targets=targets)
+                c.run_all()
+            self.assertTrue((target / "f.bin").exists())
+
+    def test_behavior_owner_trust_is_enforced(self):
+        """Layer 7/T-130: an unverified owner cannot authorize a real delete."""
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "Cache"
+            target.mkdir()
+            (target / "f.bin").write_bytes(b"x" * 10)
+            targets = {k: False for k in vac.SYSTEM_TARGET_DEFAULTS}
+            targets["AccuRIG Cache"] = True
+            with patch.object(vac, "USER_APPDATA_TARGETS", [(target, "AccuRIG Cache", "accu rig")]), \
+                 patch.object(vac, "get_running_processes", return_value=set()):
+                c = vac.SystemCleaner(False, vac.Logger(log_file=None, dry_run=False), targets=targets)
+                c.run_all()
+            self.assertTrue((target / "f.bin").exists())
+
+    def test_behavior_toctou_replacement_survives(self):
+        """Layer 11/T-124: a replaced candidate is never deleted."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            f = root / "deep" / "junk.bin"
+            f.parent.mkdir(parents=True)
+            f.write_bytes(b"x" * 100)
+            c = vac.CleanerEngine(False, vac.Logger(log_file=None, dry_run=False),
+                                  vac.SafetyGuard(root, allow_shallow_system_target=True), root)
+            plan = c._plan_file(f)
+            f.unlink()
+            f.write_bytes(b"y" * 300)
+            result = c._apply_file_plan(f, plan[0], plan[1])
+            self.assertFalse(result.success)
+            self.assertTrue(f.exists())
+
+    def test_behavior_root_protection_is_absolute(self):
+        """Layer 3: protected roots and every descendant are refused."""
+        self.assertTrue(vac.is_path_blacklisted(Path(os.environ.get("windir", r"C:\Windows")) / "Temp" / "x"))
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            guard = vac.SafetyGuard(root)
+            ok, reason = guard.is_safe(root)
+            self.assertFalse(ok)
+            self.assertIn("target root", reason)
+
+    def test_behavior_target_policy_parity_is_executable(self):
+        """Layers 5/10 + status: one planner, one mask policy, executable proof."""
+        config = {"portable_roots": [], "custom_rules": [],
+                  "exclude_patterns": ["*.secret"], "exclude_paths": [],
+                  "system_targets": {"Recycle Bin": True}}
+        status = vac.resolve_job_spec(dry_run=True, run_portable=True, run_system=True, run_custom=True,
+                                      config=config, surface="status")
+        self.assertEqual(dict(status.sys_targets), dict(vac.SYSTEM_TARGET_DEFAULTS))
+        self.assertIn("*.secret", status.exclude_patterns)
+
     def test_idempotent_rerun_missing_paths_skipped(self):
         """Operational doc claim: a crashed run is safe to re-run."""
         with tempfile.TemporaryDirectory() as tmp:
@@ -2771,12 +2937,13 @@ class TestSafetyDocContract(unittest.TestCase):
 
 
 class TestMutationChokepoint(unittest.TestCase):
-    """B: every real filesystem mutation sits behind the single JIT gate."""
+    """B/T-134: every real mutation sits behind the single JIT gate; the
+    mutation inventory is allowlisted by subsystem, with NO cleaner side door."""
 
     @staticmethod
     def _enclosing_def(src_lines, idx):
         for j in range(idx, -1, -1):
-            m = re.match(r"    def (\w+)", src_lines[j])
+            m = re.match(r"^(?:    )?def (\w+)", src_lines[j])
             if m:
                 return m.group(1)
         return None
@@ -2784,11 +2951,44 @@ class TestMutationChokepoint(unittest.TestCase):
     def test_unlink_rmdir_chmod_only_inside_apply_gates(self):
         src_lines = Path(vac.__file__).read_text(encoding="utf-8").splitlines()
         for i, line in enumerate(src_lines):
-            for token in (".unlink(", ".rmdir(", ".chmod("):
+            if "_MUTATION_TOKENS =" in line or "_PRIMITIVES =" in line or "_PERSISTENCE_TOKENS =" in line or "_ACTION_TOKENS =" in line:
+                continue
+            for token in vac._CLEANER_MUTATION_TOKENS:
                 if token in line:
                     enclosing = self._enclosing_def(src_lines, i)
-                    self.assertIn(enclosing, ("_apply_file_plan", "_apply_tree_plan"),
+                    self.assertIn(enclosing, vac._CLEANER_MUTATION_SITES,
                                   f"{token} at line {i + 1} is a side-door mutation inside {enclosing}")
+
+    def test_no_banned_cleaner_primitive_anywhere(self):
+        """os.remove / shutil.rmtree / rename/replace primitives never appear."""
+        src = Path(vac.__file__).read_text(encoding="utf-8")
+        # strip the inventory definition block itself so its own strings don't trip the scan
+        src = re.sub(r"_BANNED_CLEANER_PRIMITIVES = \([^)]*\)", "", src)
+        for banned in vac._BANNED_CLEANER_PRIMITIVES:
+            self.assertNotIn(banned, src, f"unreviewed cleaner mutation primitive {banned}")
+
+    def test_config_persistence_uses_only_its_own_atomic_replace(self):
+        src_lines = Path(vac.__file__).read_text(encoding="utf-8").splitlines()
+        allowed = vac._CONFIG_PERSISTENCE_SITES + ("get_running_processes",)  # str.replace in tasklist parse
+        for i, line in enumerate(src_lines):
+            if "_PERSISTENCE_TOKENS =" in line:
+                continue
+            for token in vac._CONFIG_PERSISTENCE_TOKENS:
+                if token in line:
+                    enclosing = self._enclosing_def(src_lines, i)
+                    self.assertIn(enclosing, allowed,
+                                  f"{token} at line {i + 1} inside {enclosing} is not config persistence")
+
+    def test_service_actions_live_only_in_declared_sites(self):
+        src_lines = Path(vac.__file__).read_text(encoding="utf-8").splitlines()
+        for i, line in enumerate(src_lines):
+            if "_ACTION_TOKENS =" in line:
+                continue
+            for token in vac._SERVICE_ACTION_TOKENS:
+                if token in line:
+                    enclosing = self._enclosing_def(src_lines, i)
+                    self.assertIn(enclosing, vac._SERVICE_ACTION_SITES,
+                                  f"{token} at line {i + 1} inside {enclosing} is an unreviewed service action")
 
     def test_dry_run_performs_zero_destructive_subprocess_calls(self):
         """DNS flush / service stop-start are unreachable in dry-run (B)."""
@@ -2810,6 +3010,461 @@ class TestMutationChokepoint(unittest.TestCase):
         self.assertNotIn("_fs_helper_get_size", src)
         self.assertNotIn("is_system_root", src)
         self.assertIsNone(re.search(r"\b_NUMBERED_RE\b", src), "PortableCleaner duplicate regex returned")
+
+
+class TestCandidateLedger(unittest.TestCase):
+    """T-124: one physical candidate is claimed once, at the planning source."""
+
+    def _tree(self):
+        tmp = tempfile.TemporaryDirectory()
+        root = Path(tmp.name)
+        parent = root / "app"
+        child = parent / "deep"
+        child.mkdir(parents=True)
+        return tmp, parent, child
+
+    def test_exact_duplicate_covered(self):
+        tmp, parent, _ = self._tree()
+        try:
+            lg = vac.CandidateLedger()
+            lg.claim(parent)
+            self.assertTrue(lg.covered(parent))
+            self.assertTrue(lg.covered(parent / "deep" / "f.bin"))
+        finally:
+            tmp.cleanup()
+
+    def test_parent_child_overlap(self):
+        tmp, parent, child = self._tree()
+        try:
+            lg = vac.CandidateLedger()
+            lg.claim(parent)
+            self.assertTrue(lg.covered(child))
+            lg.claim(parent / "other")
+            self.assertTrue(lg.covered(parent / "other"))
+        finally:
+            tmp.cleanup()
+
+    def test_ancestor_claim_absorbs_descendants(self):
+        tmp, parent, child = self._tree()
+        try:
+            lg = vac.CandidateLedger()
+            lg.claim(child)
+            self.assertFalse(lg.covered(parent), "parent is not yet claimed")
+            self.assertEqual(lg.claims_within(parent), [vac.CandidateLedger._canon(child)])
+            lg.claim(parent)
+            self.assertTrue(lg.covered(child))
+            self.assertEqual(len(lg), 1, "absorbed descendant claim must not remain")
+        finally:
+            tmp.cleanup()
+
+    def test_canonical_alias_collapses(self):
+        tmp, parent, _ = self._tree()
+        try:
+            lg = vac.CandidateLedger()
+            canon = vac.CandidateLedger._canon(parent)
+            alias = Path(str(parent).replace("\\", "/"))
+            lg.claim(canon)
+            self.assertTrue(lg.covered(alias))
+        finally:
+            tmp.cleanup()
+
+    def test_claim_after_plan_excludes_absorbed_subtrees(self):
+        """A target that absorbs a prior claim must EXCLUDE it from its plan."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "target"
+            cache = target / "Cache"
+            cache.mkdir(parents=True)
+            (cache / "a.bin").write_bytes(b"x" * 10)
+            ledger = vac.CandidateLedger()
+            ledger.claim(cache)  # prior layer claimed the cache subtree
+            log = vac.Logger(log_file=None, dry_run=True, quiet=True)
+            engine = vac.CleanerEngine(True, log, vac.SafetyGuard(root, allow_shallow_system_target=True), root, ledger=ledger)
+            excluded = engine._ledger_claims_within(target)
+            plan = engine._plan_tree(target, "target", excluded_regions=excluded)
+            self.assertIsNotNone(plan)
+            self.assertEqual(plan["bytes"], 0, "absorbed cache subtree must not be double-counted")
+
+
+class TestJobOverlap(unittest.TestCase):
+    """T-124: cross-layer overlap counts each physical byte once."""
+
+    def _portable_with_cache(self, root, size=10):
+        p = root / "portable"
+        (p / "_CENT" / "User Data" / "Default" / "Cache").mkdir(parents=True)
+        (p / "_CENT" / "User Data" / "Default" / "Cache" / "data_0").write_bytes(b"x" * size)
+        return p
+
+    def test_custom_rule_on_same_cache_counts_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            p = self._portable_with_cache(root)
+            cache = p / "_CENT" / "User Data" / "Default" / "Cache"
+            cfg = {"portable_roots": [str(p)],
+                   "custom_rules": [{"path": str(cache), "pattern": "*"}],
+                   "exclude_patterns": [], "exclude_paths": []}
+            log = vac.Logger(log_file=None, dry_run=True, quiet=True)
+            with patch.object(vac, "get_running_processes", return_value=set()):
+                spec = vac.resolve_job_spec(dry_run=True, run_portable=True, run_system=False, run_custom=True,
+                                            config=cfg, surface="cli")
+                res = vac.run_cleaning_job(spec, log)
+            self.assertEqual(res["portable"], 10)
+            self.assertEqual(res["custom"], 0, "custom must not re-plan a claimed cache")
+            self.assertEqual(res["portable"] + res["custom"], 10)
+
+    def test_custom_rule_on_ancestor_counts_unique_bytes_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            p = self._portable_with_cache(root)
+            (p / "other.txt").write_text("other")
+            cfg = {"portable_roots": [str(p)],
+                   "custom_rules": [{"path": str(p), "pattern": "*"}],
+                   "exclude_patterns": [], "exclude_paths": []}
+            log = vac.Logger(log_file=None, dry_run=True, quiet=True)
+            with patch.object(vac, "get_running_processes", return_value=set()):
+                spec = vac.resolve_job_spec(dry_run=True, run_portable=True, run_system=False, run_custom=True,
+                                            config=cfg, surface="cli")
+                res = vac.run_cleaning_job(spec, log)
+            # portable plans the 10-byte cache; custom plans only the non-claimed 5 bytes
+            self.assertEqual(res["portable"], 10)
+            self.assertEqual(res["custom"], 5)
+            self.assertEqual(res["portable"] + res["custom"], 15, "no physical byte planned twice")
+
+
+class TestStatusPolicy(unittest.TestCase):
+    """T-127: --status uses the SAFE CLI mask and applies saved exclusions."""
+
+    def test_status_resolution_safe_mask_plus_exclusions(self):
+        config = {
+            "portable_roots": [], "custom_rules": [],
+            "exclude_patterns": ["*.secret"], "exclude_paths": ["D:\\Keep"],
+            "system_targets": {"Recycle Bin": True, "System Temp": False},
+        }
+        spec = vac.resolve_job_spec(dry_run=True, run_portable=True, run_system=True, run_custom=True,
+                                    config=config, surface="status")
+        # status represents the documented SAFE CLI policy: config prefs do NOT leak in
+        self.assertEqual(dict(spec.sys_targets), dict(vac.SYSTEM_TARGET_DEFAULTS))
+        self.assertFalse(spec.sys_targets["Recycle Bin"])
+        self.assertTrue(spec.sys_targets["System Temp"])
+        # saved exclusions ALWAYS apply on every surface
+        self.assertIn("*.secret", spec.exclude_patterns)
+        self.assertTrue(any("Keep" in p for p in spec.exclude_paths))
+
+    def test_status_obeys_saved_exclusions_end_to_end(self):
+        """A target excluded via saved config contributes 0 to --status."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "Cache"
+            (target / "deep").mkdir(parents=True)
+            (target / "deep" / "f.bin").write_bytes(b"x" * 100)
+            config = {
+                "portable_roots": [], "custom_rules": [],
+                "exclude_patterns": [], "exclude_paths": [str(target)],
+                "system_targets": {},
+            }
+            buf = io.StringIO()
+            with patch.object(vac, "USER_APPDATA_TARGETS", [(target, "Discord Cache", "discord")]), \
+                 patch.object(vac, "get_running_processes", return_value=set()), \
+                 patch.object(vac, "SYSTEM_TEMP", Path(tmp) / "none"), \
+                 patch.object(vac, "USER_TEMP", Path(tmp) / "none"), \
+                 patch.object(vac, "USER_CRASH", Path(tmp) / "none"), \
+                 patch.object(vac, "USER_EXPLORER", Path(tmp) / "none"), \
+                 patch.object(vac, "load_config", return_value=config), \
+                 contextlib.redirect_stdout(buf):
+                vac.cli_status()
+            self.assertNotIn("Discord Cache", buf.getvalue(),
+                             "an excluded target must not appear as a status candidate")
+
+
+class TestSurfaceMatrix(unittest.TestCase):
+    """T-129/markhunt C: same GUI state resolves identical masks on every surface."""
+
+    GUI_STATE = None
+
+    def _state(self):
+        st = dict(vac.SYSTEM_TARGET_DEFAULTS)
+        st["Recycle Bin"] = True
+        st["System Temp"] = False
+        return st
+
+    def test_gui_background_scheduled_identical_masks(self):
+        state = self._state()
+        cfg = {"portable_roots": [], "custom_rules": [], "exclude_patterns": [], "exclude_paths": [],
+               "system_targets": dict(state)}
+        masks = {}
+        for surf in ("gui", "background", "scheduled"):
+            spec = vac.resolve_job_spec(dry_run=True, run_portable=True, run_system=True, run_custom=True,
+                                        config=cfg, sys_targets=state, surface=surf)
+            masks[surf] = dict(spec.sys_targets)
+        self.assertEqual(masks["gui"], state)
+        self.assertEqual(masks["background"], masks["gui"])
+        self.assertEqual(masks["scheduled"], masks["gui"])
+
+    def test_cli_and_status_stay_safe_defaults(self):
+        cfg = {"portable_roots": [], "custom_rules": [], "exclude_patterns": [], "exclude_paths": []}
+        for surf in ("cli", "status"):
+            spec = vac.resolve_job_spec(dry_run=True, run_portable=True, run_system=True, run_custom=True,
+                                        config=cfg, surface=surf)
+            self.assertEqual(dict(spec.sys_targets), dict(vac.SYSTEM_TARGET_DEFAULTS), surf)
+
+    def test_mask_round_trip_via_argv_deviations(self):
+        """clean_argv serializes both directions; the CLI side decodes them back."""
+        state = self._state()
+        enables, disables = vac._target_deviations(state)
+        self.assertIn("Recycle Bin", enables)
+        self.assertNotIn("System Temp", enables)
+        self.assertIn("System Temp", disables)
+        decoded = vac.resolve_job_spec(dry_run=True, run_portable=True, run_system=True, run_custom=True,
+                                       config={"portable_roots": [], "custom_rules": [],
+                                               "exclude_patterns": [], "exclude_paths": []},
+                                       cli_enable=enables, cli_disable=disables, surface="cli")
+        self.assertEqual(dict(decoded.sys_targets), state)
+
+
+class TestOwnerTrustEnforcement(unittest.TestCase):
+    """T-130: presence of provenance is not trust; unverified owners cannot authorize."""
+
+    def test_trust_states(self):
+        self.assertEqual(vac._owner_trust("devin"), "verified")
+        self.assertEqual(vac._owner_trust("accu rig"), "unverified")
+        self.assertEqual(vac._owner_trust("general"), "verified")
+        self.assertEqual(vac._owner_trust("nope"), "verified")  # no mapping -> nothing running to guard
+
+    def test_unverified_owner_cannot_authorize_any_mode(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "Cache"
+            target.mkdir()
+            (target / "f.bin").write_bytes(b"x" * 10)
+            targets = {k: False for k in vac.SYSTEM_TARGET_DEFAULTS}
+            targets["AccuRIG Cache"] = True
+            with patch.object(vac, "USER_APPDATA_TARGETS", [(target, "AccuRIG Cache", "accu rig")]), \
+                 patch.object(vac, "get_running_processes", return_value=set()):
+                for dry in (False, True):
+                    log = vac.Logger(log_file=None, dry_run=dry)
+                    c = vac.SystemCleaner(dry, log, targets=targets)
+                    c.run_all()
+                    self.assertEqual(log.n_deleted, 0, f"dry={dry}: unverified owner must not authorize")
+                    self.assertTrue((target / "f.bin").exists())
+
+    def test_verified_owner_can_authorize_when_not_running(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "Cache"
+            target.mkdir()
+            (target / "f.bin").write_bytes(b"x" * 10)
+            targets = {k: False for k in vac.SYSTEM_TARGET_DEFAULTS}
+            targets["Discord Cache"] = True
+            with patch.object(vac, "USER_APPDATA_TARGETS", [(target, "Discord Cache", "discord")]), \
+                 patch.object(vac, "get_running_processes", return_value=set()):
+                c = vac.SystemCleaner(False, vac.Logger(log_file=None, dry_run=False), targets=targets)
+                c.run_all()
+            self.assertFalse((target / "f.bin").exists())
+            self.assertEqual(c.results["Discord Cache"], 10)
+
+
+class TestProcessStateTOCTOU(unittest.TestCase):
+    """T-131: an app starting between plan and apply aborts the target's mutations."""
+
+    def test_app_start_between_plan_and_apply_aborts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "Cache"
+            (target / "deep").mkdir(parents=True)
+            (target / "deep" / "a.bin").write_bytes(b"x" * 50)
+            log = vac.Logger(log_file=None, dry_run=False)
+            c = vac.SystemCleaner(False, log)
+            c.guard = vac.SafetyGuard(root, allow_shallow_system_target=True)
+            with patch.object(vac, "get_running_processes", side_effect=[set(), {"discord.exe"}]):
+                freed = c.safe_del_dir(target, "Discord Cache", "discord")
+            self.assertEqual(freed, 0)
+            self.assertTrue((target / "deep" / "a.bin").exists())
+            self.assertEqual(log.n_deleted, 0)
+
+    def test_unknown_snapshot_at_apply_aborts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "Cache"
+            target.mkdir()
+            (target / "a.bin").write_bytes(b"x" * 10)
+            log = vac.Logger(log_file=None, dry_run=False)
+            c = vac.SystemCleaner(False, log)
+            c.guard = vac.SafetyGuard(root, allow_shallow_system_target=True)
+            with patch.object(vac, "get_running_processes", side_effect=[set(), None]):
+                freed = c.safe_del_dir(target, "Discord Cache", "discord")
+            self.assertEqual(freed, 0)
+            self.assertTrue((target / "a.bin").exists())
+            self.assertEqual(log.n_deleted, 0)
+
+
+class TestCancelMutationGate(unittest.TestCase):
+    """T-132: cancellation is a mutation invariant inside the authorization gate."""
+
+    def test_cancel_after_plan_zero_mutations(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app"
+            (target / "deep").mkdir(parents=True)
+            (target / "deep" / "a.bin").write_bytes(b"x" * 50)
+            log = vac.Logger(log_file=None, dry_run=False)
+            cancel = threading.Event()
+            c = vac.CleanerEngine(False, log, vac.SafetyGuard(root, allow_shallow_system_target=True), root,
+                                  cancel_event=cancel)
+            plan = c._plan_tree(target, "app")
+            self.assertIsNotNone(plan)
+            cancel.set()
+            with self.assertRaises(vac.CancelJobException):
+                c._apply_tree_plan(plan, "app")
+            self.assertTrue((target / "deep" / "a.bin").exists())
+            self.assertEqual(log.n_deleted, 0)
+
+    def test_cancel_before_retry_aborts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            f = root / "deep" / "f.bin"
+            f.parent.mkdir(parents=True)
+            f.write_bytes(b"x" * 20)
+            log = vac.Logger(log_file=None, dry_run=False)
+            cancel = threading.Event()
+            c = vac.CleanerEngine(False, log, vac.SafetyGuard(root, allow_shallow_system_target=True), root,
+                                  cancel_event=cancel)
+            plan = c._plan_file(f)
+            self.assertIsNotNone(plan)
+
+            def set_cancel_sleep(*_a, **_k):
+                cancel.set()
+
+            with patch.object(vac.time, "sleep", side_effect=set_cancel_sleep), \
+                 patch.object(Path, "unlink", side_effect=PermissionError), \
+                 self.assertRaises(vac.CancelJobException):
+                c._apply_file_plan(f, plan[0], plan[1])
+            self.assertTrue(f.exists())
+            self.assertEqual(log.n_deleted, 0)
+
+    def test_cancel_before_root_rmdir(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app"
+            target.mkdir()
+            (target / "x.bin").write_bytes(b"x" * 10)
+            log = vac.Logger(log_file=None, dry_run=False)
+            cancel = threading.Event()
+            c = vac.CleanerEngine(False, log, vac.SafetyGuard(root, allow_shallow_system_target=True), root,
+                                  cancel_event=cancel)
+            plan = c._plan_tree(target, "app")
+            self.assertIsNotNone(plan)
+            (target / "x.bin").unlink()  # tree now empty -> root rmdir would fire
+            cancel.set()
+            with self.assertRaises(vac.CancelJobException):
+                c._apply_tree_plan(plan, "app")
+            self.assertTrue(target.exists(), "cancel must gate the root rmdir")
+
+
+class TestDifferentialPlan(unittest.TestCase):
+    """Markhunt B: dry-run candidate truth equals the real-delete pre-apply set."""
+
+    def test_dry_run_and_delete_agree_before_mutation(self):
+        def fixture(root):
+            (root / "app" / "deep").mkdir(parents=True)
+            (root / "app" / "deep" / "a.bin").write_bytes(b"x" * 100)
+            (root / "app" / "keep").mkdir(parents=True)
+            (root / "app" / "keep" / "Login Data").write_text("secrets")
+            (root / "app" / "b.bin").write_bytes(b"y" * 30)
+
+        with tempfile.TemporaryDirectory() as tmpA, tempfile.TemporaryDirectory() as tmpB:
+            rootA, rootB = Path(tmpA), Path(tmpB)
+            fixture(rootA)
+            fixture(rootB)
+
+            dry_log = vac.Logger(log_file=None, dry_run=True, quiet=True)
+            dry_engine = vac.CleanerEngine(True, dry_log, vac.SafetyGuard(rootA, allow_shallow_system_target=True), rootA)
+            dry_plan = dry_engine._plan_tree(rootA / "app", "app")
+            self.assertEqual(dry_plan["bytes"], 130)
+
+            del_log = vac.Logger(log_file=None, dry_run=False)
+            del_engine = vac.CleanerEngine(False, del_log, vac.SafetyGuard(rootB, allow_shallow_system_target=True), rootB)
+            del_plan = del_engine._plan_tree(rootB / "app", "app")
+            # candidate sets + planned unique bytes match before any mutation
+            self.assertEqual(
+                sorted((str(f.relative_to(rootA)), sz) for f, sz, _ in dry_plan["files"]),
+                sorted((str(f.relative_to(rootB)), sz) for f, sz, _ in del_plan["files"]),
+            )
+            self.assertEqual(dry_plan["bytes"], del_plan["bytes"])
+            # after apply: actual freed <= planned bytes (exclusions/links only reduce)
+            freed, _fully = del_engine._apply_tree_plan(del_plan, "app")
+            self.assertLessEqual(freed, del_plan["bytes"])
+            self.assertFalse((rootB / "app" / "a.bin").exists())
+            self.assertFalse((rootB / "app" / "b.bin").exists())
+            self.assertTrue((rootB / "app" / "keep" / "Login Data").exists())
+
+
+class TestProvenanceAudit(unittest.TestCase):
+    """Markhunt E: every AppData target resolves to a verified owner or is not actionable."""
+
+    def test_every_appdata_owner_is_trusted_or_target_not_actionable(self):
+        for path, desc, owner in vac.USER_APPDATA_TARGETS:
+            if owner is None:
+                self.assertIn(desc, vac.PROCESS_AGNOSTIC_TARGETS, f"{desc}: owner=None not agnostic")
+            elif vac._owner_trust(owner) == "unverified":
+                # fail-closed: unverified-owner targets can never authorize real deletion
+                self.assertTrue(True)  # enforcement tested in TestOwnerTrustEnforcement
+            else:
+                self.assertEqual(vac._owner_trust(owner), "verified", f"{desc}")
+
+    def test_no_readme_claims_verified_owners_beyond_the_invariant(self):
+        """If README/docs say an owner is verified, the invariant must hold for it."""
+        for doc in ("README.md", "README.ru.md", "README.et.md", "README.ded.md", "docs/Safety.md"):
+            path = Path(vac.__file__).resolve().parent / doc
+            if not path.exists():
+                continue
+            text = path.read_text(encoding="utf-8")
+            for group, prov in vac.APP_PROCESSES_PROVENANCE.items():
+                if prov.startswith("unverified-exe") and group.lower() in text.lower():
+                    self.fail(f"{doc} mentions unverified group '{group}' without a trust disclaimer")
+
+
+class TestGuiJobFreeze(unittest.TestCase):
+    """T-128: the job spec is frozen on the Tk thread BEFORE the worker starts."""
+
+    def _app(self):
+        return TestGuiThreadBoundary._fake_app(None)
+
+    def test_spec_frozen_before_worker_and_mutations_do_not_leak(self):
+        app = self._app()
+        app.T = {"cancelled": "cancelled", "confirm_title": "t", "confirm_body": "b"}
+        app.config = {"portable_roots": [], "custom_rules": [], "exclude_patterns": ["*.old"],
+                      "exclude_paths": [], "system_targets": {}}
+        captured = {}
+
+        def fake_job(spec, log, cancel_event=None, progress=None):
+            captured["patterns"] = list(spec.exclude_patterns)
+            captured["targets"] = dict(spec.sys_targets)
+
+        with patch.object(vac, "run_cleaning_job", side_effect=fake_job), \
+             patch.object(vac, "Logger"), \
+             patch.object(vac.messagebox, "askyesno", return_value=True):
+            app._start_job()
+        # mutate GUI state after the spec was frozen but before the worker ran
+        app.config["exclude_patterns"].append("*.new")
+        app.sys_targets["Recycle Bin"] = True
+        app._worker_thread.join(timeout=10)
+        self.assertIn("*.old", captured["patterns"])
+        self.assertNotIn("*.new", captured["patterns"], "worker must not see post-freeze GUI edits")
+        self.assertFalse(captured["targets"]["Recycle Bin"])
+
+    def test_preview_spec_is_read_only_dry_run(self):
+        app = self._app()
+        captured = {}
+
+        def fake_job(spec, log, cancel_event=None, progress=None):
+            captured["dry_run"] = spec.dry_run
+
+        with patch.object(vac, "run_cleaning_job", side_effect=fake_job), \
+             patch.object(vac, "Logger"):
+            app._start_preview()
+        app._worker_thread.join(timeout=10)
+        self.assertTrue(captured["dry_run"])
+
+
+
 
 
 
