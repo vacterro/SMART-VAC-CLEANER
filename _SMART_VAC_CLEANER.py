@@ -59,7 +59,7 @@ import customtkinter as ctk
 
 
 
-VERSION = "2.6.6"
+VERSION = "2.6.7"
 
 DEFAULT_THREADS = 12
 
@@ -146,6 +146,32 @@ _SERVICE_ACTION_SITES = ("_clean_windows_update_cache", "run_all", "_service_sta
 _SERVICE_ACTION_TOKENS = ("net stop", "net start", "ipconfig", "SHEmptyRecycleBin", "sc query")
 _BANNED_CLEANER_PRIMITIVES = ("os.remove(", "os.unlink(", "os.rmdir(",
                               "shutil.rmtree(", "shutil.move(", "Path.rename(", ".rename(")
+
+# T-110: log-hygiene retention is its own mutation subsystem (NOT a cleaner
+# deletion): it only ever removes clean_*.log files from the cleaner's own
+# logs/ directory.
+_LOG_RETENTION_KEEP = 14
+_LOG_RETENTION_SITES = ("_prune_old_logs",)
+_LOG_RETENTION_TOKENS = (".unlink(",)
+
+
+def _prune_old_logs(logs_dir: Path, keep: int = _LOG_RETENTION_KEEP) -> None:
+    """T-110: keep the `keep` most recent clean_*.log files, prune older ones.
+
+    LOG-hygiene, not a cleaner deletion: the only files it ever removes are the
+    cleaner's own timestamped run logs, and it is allowlisted in the mutation
+    inventory as its own subsystem (never routed through the deletion
+    SafetyGuard). Runs once per job at Logger construction.
+    """
+    try:
+        logs = sorted(logs_dir.glob("clean_*.log"), key=lambda p: p.name, reverse=True)
+        for old in logs[keep:]:
+            try:
+                old.unlink()
+            except OSError:
+                continue
+    except OSError:
+        pass  # logs dir missing/unreadable: nothing to prune
 
 
 APP_PROCESSES: dict[str, set[str]] = {
@@ -992,6 +1018,10 @@ class Logger:
             except OSError as exc:
 
                 self._log.warning(f"Cannot open log file {log_file}: {exc}")
+
+            # T-110: bound the logs/ directory (retention) on every job start --
+            # clean/scheduled/background runs all construct a Logger.
+            _prune_old_logs(log_file.parent)
 
 
     def _emit_gui(self, msg: str):

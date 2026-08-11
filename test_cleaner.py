@@ -355,6 +355,24 @@ class TestLogger(unittest.TestCase):
     def test_summary_no_crash(self):
         vac.Logger(log_file=None, dry_run=True).summary()
 
+    def test_logger_construction_prunes_old_logs(self):
+        """T-110: building a Logger prunes to the retention bound, newest kept."""
+        with tempfile.TemporaryDirectory() as tmp:
+            logs = Path(tmp)
+            for i in range(20):
+                (logs / f"clean_20260101_{i:02d}0000.log").write_text("x")
+            try:
+                vac.Logger(log_file=logs / "clean_20260101_300000.log", dry_run=True)
+                remaining = sorted(p.name for p in logs.glob("clean_*.log"))
+                self.assertLessEqual(len(remaining), vac._LOG_RETENTION_KEEP)
+                self.assertEqual(remaining[-1], "clean_20260101_300000.log", "the current job's log is kept")
+            finally:
+                for h in logging.getLogger("vac_cleaner").handlers[:]:
+                    try:
+                        h.close()
+                    except Exception:  # noqa: BLE001, S110 - best effort
+                        pass
+
 
 class TestNumberedRegex(unittest.TestCase):
 
@@ -2950,14 +2968,28 @@ class TestMutationChokepoint(unittest.TestCase):
 
     def test_unlink_rmdir_chmod_only_inside_apply_gates(self):
         src_lines = Path(vac.__file__).read_text(encoding="utf-8").splitlines()
+        allowed = vac._CLEANER_MUTATION_SITES + vac._LOG_RETENTION_SITES
         for i, line in enumerate(src_lines):
-            if "_MUTATION_TOKENS =" in line or "_PRIMITIVES =" in line or "_PERSISTENCE_TOKENS =" in line or "_ACTION_TOKENS =" in line:
+            if "_TOKENS =" in line or "_PRIMITIVES =" in line:
                 continue
             for token in vac._CLEANER_MUTATION_TOKENS:
                 if token in line:
                     enclosing = self._enclosing_def(src_lines, i)
-                    self.assertIn(enclosing, vac._CLEANER_MUTATION_SITES,
+                    self.assertIn(enclosing, allowed,
                                   f"{token} at line {i + 1} is a side-door mutation inside {enclosing}")
+
+    def test_log_retention_is_its_own_subsystem(self):
+        """T-110: _prune_old_logs only removes clean_*.log from the logs dir."""
+        with tempfile.TemporaryDirectory() as tmp:
+            logs = Path(tmp)
+            for name in ("clean_20260101_010000.log", "clean_20260102_010000.log",
+                         "clean_20260103_010000.log", "unrelated.txt"):
+                (logs / name).write_text("x")
+            vac._prune_old_logs(logs, keep=2)
+            self.assertTrue((logs / "clean_20260103_010000.log").exists(), "newest kept")
+            self.assertTrue((logs / "clean_20260102_010000.log").exists())
+            self.assertFalse((logs / "clean_20260101_010000.log").exists(), "oldest pruned")
+            self.assertTrue((logs / "unrelated.txt").exists(), "non-log files untouched")
 
     def test_no_banned_cleaner_primitive_anywhere(self):
         """os.remove / shutil.rmtree / rename/replace primitives never appear."""
