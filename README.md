@@ -28,7 +28,7 @@ Missing drives are silently skipped, never errors.
 - **Min path depth**: shallow paths (fewer than 5 parts) are refused
 - **Running-process check**: apps using a target are skipped (per-app process lists); if the process table can't be queried, app-sensitive targets are skipped too (fail closed); the snapshot is refreshed before each destructive app group
 - **Owner coverage**: every AppData target has a verified process owner or is explicitly process-agnostic (shared package/compiler/driver caches) — no implicit `owner=None` escape hatch
-- **Symlinks / junctions / reparse points refused**, `..` traversal refused
+- **Symlinks / junctions / reparse points refused**; `..` segments are canonicalized and the resolved path is confined to the target root and revalidated — a `..` that would escape the root is refused
 - **Never-delete names**: `login data`, `bookmarks`, `cookies`, `history`, `trusted_vault.pb`, and more — numbered (`Cookies (2)`) and compound journal (`Cookies (2)-wal`) variants reduce mechanically to the protected base
 - **Exclusions**: `exclude_patterns` / `exclude_paths` in config apply to every deletion (portable, system, custom, deep sweep)
 - **Backup files**: generic `.bak` rollback artifacts are never auto-deleted
@@ -57,7 +57,10 @@ vac-cleaner --status
 
 No Python? Grab `SmartVACCleaner.exe` from the GitHub
 [Releases](https://github.com/vacterro/SMART-VAC-CLEANER/releases) tab —
-fully portable, config and logs live next to the exe.
+fully portable, config and logs live next to the exe. Releases are created
+automatically from tagged builds by the `build-exe` workflow; if a version is
+tagged but has no Release page yet, the workflow has not finished (or the run
+failed).
 
 ## Build the exe yourself
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""F6 clean-install smoke test for the wheel contract.
+"""F6/T-140 clean-install smoke test for the wheel contract.
 
 Proves that `pip install .` works OUTSIDE the repository, not only as a source
 checkout:
@@ -9,13 +9,14 @@ checkout:
      visible without re-downloading them -- the wheel's OWN files still come
      from the wheel)
   3. pip install the wheel
-  4. run:
+  4. point the INSTALLED cleaner at a temp fixture via SMARTVAC_DATA_DIR
+     (T-139 resolver) and run:
        vac-cleaner --help
        vac-cleaner --status
-       a safe dry-run against a temp fixture
-  5. import the helper module and the localization resources from a cwd that
-     is NOT the repository, and prove the locale file really came from the
-     wheel (a translated key must differ from the English default)
+       a dry-run that MUST plan the 64-byte fixture exactly once
+  5. prove the imported modules/locales come from the installed wheel, not the
+     repository or the global environment, by running from a cwd outside the
+     repo and asserting the module paths live inside the venv site-packages.
 
 The PyInstaller exe is a SEPARATE contract (build_exe.ps1 / build-exe.yml).
 
@@ -30,8 +31,8 @@ import venv
 from pathlib import Path
 
 
-def run(cmd, cwd=None, check=True):
-    r = subprocess.run(cmd, capture_output=True, text=True, cwd=cwd, check=False)
+def run(cmd, cwd=None, check=True, env=None):
+    r = subprocess.run(cmd, capture_output=True, text=True, cwd=cwd, check=False, env=env)
     if check and r.returncode != 0:
         print(r.stdout)
         print(r.stderr)
@@ -55,6 +56,16 @@ def main() -> int:
         raise SystemExit(f"expected exactly one wheel, got {wheels}")
     wheel = wheels[0]
 
+    # inspect the wheel contents directly: the required modules + locales must be in it
+    import zipfile
+    with zipfile.ZipFile(wheel) as z:
+        names = z.namelist()
+    for probe in ("_SMART_VAC_CLEANER.py", "_fs_helpers.py", "analyze_caches.py",
+                  "strings/ru.json", "strings/et.json", "strings/ded.json"):
+        if not any(n.endswith(probe) for n in names):
+            raise SystemExit(f"wheel missing {probe}")
+    print("wheel contents verified (3 modules + 3 locales)")
+
     # 2. clean venv (system-site-packages: GUI deps visible, wheel still fresh)
     venv.create(venv_dir, with_pip=True, system_site_packages=True)
     if os.name == "nt":
@@ -73,39 +84,73 @@ def main() -> int:
     # 4b. --status (read-only planner)
     run([str(py), "-m", "_SMART_VAC_CLEANER", "--status"], cwd=str(tmp))
 
-    # 4c. safe dry-run against a temp fixture (portable root with a cache)
+    # 4c. point the INSTALLED cleaner at a temp fixture (T-139 resolver) and run
+    #     a dry-run that MUST plan the 64-byte fixture exactly once.
     fixture = tmp / "fixture"
     cache = fixture / "portable" / "_CENT" / "User Data" / "Default" / "Cache"
     cache.mkdir(parents=True)
     (cache / "data_0").write_bytes(b"x" * 64)
     cfg = fixture / "cleaner_config.json"
-    cfg.write_text(
-        f'{{"portable_roots": ["{fixture / "portable"}"], "custom_rules": [],'
-        f' "exclude_patterns": [], "exclude_paths": []}}',
-        encoding="utf-8",
-    )
+    import json as _json
+    cfg.write_text(_json.dumps({
+        "portable_roots": [str(fixture / "portable")], "custom_rules": [],
+        "exclude_patterns": [], "exclude_paths": [],
+    }), encoding="utf-8")
+    before = (cache / "data_0").read_bytes()
+    env = dict(os.environ)
+    env["SMARTVAC_DATA_DIR"] = str(fixture)
     dry = run(
         [str(py), "-m", "_SMART_VAC_CLEANER", "--portable", "--dry-run", "--delete"],
-        cwd=str(fixture),
+        cwd=str(tmp),
+        env=env,
     )
-    if not (cache / "data_0").exists():
-        raise SystemExit("FAILED: dry-run mutated the fixture")
     if "[DRY-RUN]" not in dry.stdout:
-        raise SystemExit("FAILED: dry-run did not report planned items")
-
-    # 5. import helpers + localization WITHOUT the repo on the path
-    code = (
-        "import _SMART_VAC_CLEANER as vac; "
-        "import _fs_helpers as fsh; "
-        "import analyze_caches; "
-        "assert hasattr(vac, 'VERSION'); "
-        "assert callable(fsh.get_size); "
-        "et = vac.load_strings('et'); "
-        "assert set(et) == set(vac.DEFAULT_STRINGS), 'locale key set drifted'; "
-        "assert et['clean'] != vac.DEFAULT_STRINGS['clean'], 'locale file NOT found: loaded English defaults'; "
-        "print('IMPORT-OK et.clean =', et['clean'])"
+        raise SystemExit("FAILED: dry-run did not run")
+    if not (cache / "data_0").exists() or (cache / "data_0").read_bytes() != before:
+        raise SystemExit("FAILED: dry-run mutated the fixture")
+    # the planner inside the venv must report EXACTLY 64 planned unique bytes for the cache
+    # (process snapshot pinned to 'nothing running' so the app-owned fixture is sweepable)
+    oracle_src = (
+        "import sys\n"
+        "import _SMART_VAC_CLEANER as vac\n"
+        "from unittest import mock\n"
+        "from pathlib import Path\n"
+        f"vac.CONFIG_FILE = Path(r'{fixture}') / 'cleaner_config.json'\n"
+        "cfg = vac.load_config()\n"
+        "spec = vac.resolve_job_spec(dry_run=True, run_portable=True, run_system=False,\n"
+        "                            run_custom=False, config=cfg, surface='cli')\n"
+        "with mock.patch.object(vac, 'get_running_processes', return_value=set()):\n"
+        "    res = vac.run_cleaning_job(spec, vac.Logger(log_file=None, dry_run=True, quiet=True))\n"
+        "assert res['portable'] == 64, res\n"
+        "print('FIXTURE-PLANNED-64-OK')\n"
     )
-    run([str(py), "-c", code], cwd=str(tmp))
+    oracle_file = fixture / "oracle.py"
+    oracle_file.write_text(oracle_src, encoding="utf-8")
+    r = run([str(py), str(oracle_file)], cwd=str(tmp), env=env)
+    if "FIXTURE-PLANNED-64-OK" not in r.stdout:
+        raise SystemExit("FAILED: installed planner did not report the 64-byte fixture once")
+    print("dry-run planned the 64-byte fixture exactly once; fixture byte-identical")
+
+    # 5. import helpers + localization WITHOUT the repo on the path; prove the
+    #    module/locale resources come from the INSTALLED wheel (venv site-packages).
+    sitepk = str(venv_dir / ("Lib" if os.name == "nt" else "lib") /
+                 ("site-packages" if os.name == "nt" else f"python{sys.version_info[0]}.{sys.version_info[1]}/site-packages"))
+    import_check = (
+        "import _SMART_VAC_CLEANER as vac, _fs_helpers as fsh, analyze_caches\n"
+        "from pathlib import Path\n"
+        "for m in (vac, fsh, analyze_caches):\n"
+        "    f = Path(m.__file__).resolve()\n"
+        f"    assert str(f).startswith(r'{sitepk}'), (m.__name__, f)\n"
+        "et = vac.load_strings('et')\n"
+        "assert et['clean'] != vac.DEFAULT_STRINGS['clean'], 'locale file NOT found'\n"
+        "print('IMPORT-FROM-WHEEL-OK', Path(vac.__file__).parent)\n"
+    )
+    import_check_file = tmp / "import_check.py"
+    import_check_file.write_text(import_check, encoding="utf-8")
+    r = run([str(py), str(import_check_file)], cwd=str(tmp))
+    if "IMPORT-FROM-WHEEL-OK" not in r.stdout:
+        raise SystemExit("FAILED: modules/locales not resolved from the installed wheel")
+    print("imports + locales resolved from the installed wheel (not the repo/global)")
 
     print("PACKAGE-SMOKE-OK")
     return 0

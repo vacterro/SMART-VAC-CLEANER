@@ -19,6 +19,7 @@ from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _SMART_VAC_CLEANER as vac
+import analyze_caches as vac_analyze
 
 
 class TestByteFormatting(unittest.TestCase):
@@ -236,8 +237,17 @@ class TestSafetyGuard(unittest.TestCase):
         self.assertFalse(ok)
 
     def test_dotdot_blocked(self):
-        ok, _ = self.guard.is_safe(self.root / ".." / "x.txt")
+        ok, reason = self.guard.is_safe(self.root / ".." / "x.txt")
         self.assertFalse(ok)
+        self.assertNotIn("..", reason, "T-144: no dead '.. part' check; the escape is refused by root confinement")
+
+    def test_dotdot_within_root_canonicalized_allowed(self):
+        """T-144: '..' segments are canonicalized; an in-root result is confined and allowed."""
+        p = self.root / "sub" / ".." / "deep" / "f.txt"
+        p.parent.mkdir(parents=True)
+        p.touch()
+        ok, _ = self.guard.is_safe(p)
+        self.assertTrue(ok)
 
     def test_system_root_allows_shallow(self):
         guard = vac.SafetyGuard(self.root, allow_shallow_system_target=True)
@@ -819,7 +829,12 @@ class TestCLIFunctions(unittest.TestCase):
                  patch.object(vac, "USER_EXPLORER", empty), \
                  patch.object(vac, "load_config", return_value={
                      "portable_roots": [], "custom_rules": [],
-                     "exclude_patterns": [], "exclude_paths": []}):
+                     "exclude_patterns": [], "exclude_paths": []}), \
+                 patch.object(vac, "load_config_strict", return_value=(
+                     True,
+                     {"portable_roots": [], "custom_rules": [],
+                      "exclude_patterns": [], "exclude_paths": []},
+                     [])):
                 try:
                     vac.cli_status()
                 except SystemExit:
@@ -989,8 +1004,18 @@ class _ExplodeMutations:
             attr = target.rsplit(".", 1)[1]
             orig = getattr(holder, attr)
             self._patches.append((holder, attr, orig))
-            def _boom(*a, _t=target, **k):
+
+            def _boom(*a, _t=target, _orig=orig, **k):
+                # T-110: LOG-hygiene retention (_prune_old_logs) removes the
+                # cleaner's OWN clean_*.log files at Logger construction in
+                # every mode; that allowlisted subsystem is not a cleaner
+                # deletion and must not trip the dry-run purity gate.
+                if _t == "pathlib.Path.unlink" and a:
+                    name = str(a[0]).rsplit("\\", 1)[-1].rsplit("/", 1)[-1]
+                    if name.startswith("clean_") and name.endswith(".log"):
+                        return _orig(*a, **k)
                 raise AssertionError(f"dry-run MUST NOT mutate: {_t} called")
+
             setattr(holder, attr, _boom)
         return self
 
@@ -1119,6 +1144,11 @@ class TestDryRunPurity(unittest.TestCase):
                      patch.object(vac, "load_config", return_value={
                          "portable_roots": [str(portable)], "custom_rules": [],
                          "exclude_patterns": [], "exclude_paths": []}), \
+                     patch.object(vac, "load_config_strict", return_value=(
+                         True,
+                         {"portable_roots": [str(portable)], "custom_rules": [],
+                          "exclude_patterns": [], "exclude_paths": []},
+                         [])), \
                      patch.object(vac, "get_running_processes", return_value=set()), \
                      patch("_SMART_VAC_CLEANER.argparse.ArgumentParser.parse_args") as mock_parse:
                     mock_parse.return_value = MagicMock(
@@ -1595,7 +1625,12 @@ class TestCLISemantics(unittest.TestCase):
         with patch.object(vac, "run_cleaning_job", side_effect=fake_job), \
              patch.object(vac, "Logger"), \
              patch.object(vac, "load_config", return_value={"portable_roots": [], "custom_rules": [],
-                                                             "exclude_patterns": ["*.db"], "exclude_paths": ["D:\\Keep"]}):
+                                                             "exclude_patterns": ["*.db"], "exclude_paths": ["D:\\Keep"]}), \
+             patch.object(vac, "load_config_strict", return_value=(
+                 True,
+                 {"portable_roots": [], "custom_rules": [],
+                  "exclude_patterns": ["*.db"], "exclude_paths": ["D:\\Keep"]},
+                 [])):
             vac.main()
         self.assertIn("*.tmp", captured["patterns"])
         self.assertIn("*.db", captured["patterns"])
@@ -2298,6 +2333,122 @@ class TestMutationAuthorization(unittest.TestCase):
             self.assertFalse(ok)
             self.assertIn("missing", reason)
 
+    def test_replace_after_chmod_before_unlink_survives(self):
+        """T-137: a swap between our chmod and the retry unlink is caught by re-auth."""
+        with self._root() as tmp:
+            root = Path(tmp)
+            f = root / "deep" / "junk.bin"
+            f.parent.mkdir(parents=True)
+            f.write_bytes(b"x" * 10)
+            engine, log = self._engine(root)
+            plan = engine._plan_file(f)
+            self.assertIsNotNone(plan)
+            calls = {"n": 0}
+            real_capture = vac._capture_identity
+
+            def swapping_capture(path):
+                calls["n"] += 1
+                ident = real_capture(path)
+                if calls["n"] == 3:  # the post-chmod re-baseline: return OLD, then swap on disk
+                    os.remove(f)
+                    f.write_bytes(b"y" * 300)
+                return ident
+
+            with patch.object(vac, "_capture_identity", side_effect=swapping_capture), \
+                 patch.object(Path, "unlink", side_effect=PermissionError):
+                result = engine._apply_file_plan(f, plan[0], plan[1])
+            self.assertFalse(result.success)
+            self.assertEqual(f.read_bytes(), b"y" * 300, "the replacement must survive")
+            self.assertEqual(log.n_deleted, 0)
+
+    def test_symlink_after_chmod_before_unlink_survives(self):
+        """T-137: a symlink introduced between our chmod and the retry unlink is refused."""
+        with self._root() as tmp:
+            root = Path(tmp)
+            f = root / "deep" / "junk.bin"
+            f.parent.mkdir(parents=True)
+            f.write_bytes(b"x" * 10)
+            outside = root / "outside.txt"
+            outside.write_text("data")
+            engine, log = self._engine(root)
+            plan = engine._plan_file(f)
+            self.assertIsNotNone(plan)
+            calls = {"n": 0}
+            real_capture = vac._capture_identity
+
+            def symlink_capture(path):
+                calls["n"] += 1
+                ident = real_capture(path)
+                if calls["n"] == 3:  # post-chmod re-baseline: return OLD, then swap to a symlink
+                    os.remove(f)
+                    try:
+                        f.symlink_to(outside)
+                    except (OSError, NotImplementedError):
+                        pass
+                return ident
+
+            with patch.object(vac, "_capture_identity", side_effect=symlink_capture), \
+                 patch.object(Path, "unlink", side_effect=PermissionError):
+                result = engine._apply_file_plan(f, plan[0], plan[1])
+            self.assertFalse(result.success)
+            if vac.is_link(f):
+                self.assertTrue(outside.exists(), "symlink target must never be touched")
+            else:
+                self.assertTrue(f.exists())
+            self.assertEqual(log.n_deleted, 0)
+
+    def test_replace_dir_after_emptiness_before_rmdir_survives(self):
+        """T-137: a dir swapped after the emptiness check is refused before rmdir."""
+        with self._root() as tmp:
+            root = Path(tmp)
+            target = root / "app"
+            sub = target / "sub"
+            sub.mkdir(parents=True)
+            (target / "a.bin").write_bytes(b"x" * 10)
+            engine, _log = self._engine(root)
+            plan = engine._plan_tree(target, "app")
+            self.assertIsNotNone(plan)
+            swapped = {"done": False}
+            real_auth = vac.CleanerEngine._authorize_mutation
+
+            def swapping_auth(self, path, planned_identity):
+                if path == sub and not swapped["done"]:
+                    swapped["done"] = True
+                    import shutil
+                    shutil.rmtree(sub)
+                    sub.mkdir()
+                    (sub / "keep.txt").write_text("keep")
+                return real_auth(self, path, planned_identity)
+
+            with patch.object(vac.CleanerEngine, "_authorize_mutation", swapping_auth):
+                _freed, fully = engine._apply_tree_plan(plan, "app")
+            self.assertTrue((sub / "keep.txt").exists(), "the replacement dir must survive")
+            self.assertFalse(fully)
+
+    def test_swap_between_chmod_auth_and_chmod_survives(self):
+        """markhunt A: a swap in the lstat->chmod window is caught by the re-baseline."""
+        with self._root() as tmp:
+            root = Path(tmp)
+            f = root / "deep" / "junk.bin"
+            f.parent.mkdir(parents=True)
+            f.write_bytes(b"x" * 10)
+            engine, log = self._engine(root)
+            plan = engine._plan_file(f)
+            self.assertIsNotNone(plan)
+            real_chmod = Path.chmod
+
+            def chmod_after_swap(self, *a, **k):
+                os.remove(f)                  # attacker swaps BEFORE our chmod executes
+                f.write_bytes(b"y" * 300)
+                return real_chmod(self, *a, **k)
+
+            with patch.object(Path, "chmod", chmod_after_swap), \
+                 patch.object(Path, "unlink", side_effect=PermissionError):
+                result = engine._apply_file_plan(f, plan[0], plan[1])
+            self.assertFalse(result.success)
+            self.assertEqual(f.read_bytes(), b"y" * 300, "the swapped-in file must survive")
+            self.assertEqual(log.n_deleted, 0)
+
     def test_identity_change_detected_by_fingerprint(self):
         """Different object at same path must never pass the identity gate."""
         with self._root() as tmp:
@@ -2583,7 +2734,9 @@ class TestStatusDryRunParity(unittest.TestCase):
                 # T-124: the 25-byte Chromium cache is planned exactly once
                 self.assertEqual(res.get("portable", 0), 25)
                 buf = io.StringIO()
-                with patch.object(vac, "load_config", return_value=cfg), contextlib.redirect_stdout(buf):
+                with patch.object(vac, "load_config", return_value=cfg), \
+                     patch.object(vac, "load_config_strict", return_value=(True, cfg, [])), \
+                     contextlib.redirect_stdout(buf):
                     vac.cli_status()
             total_lines = [l for l in buf.getvalue().splitlines() if "TOTAL" in l]
             self.assertTrue(total_lines, "cli_status must print a TOTAL line")
@@ -3202,6 +3355,7 @@ class TestStatusPolicy(unittest.TestCase):
                  patch.object(vac, "USER_CRASH", Path(tmp) / "none"), \
                  patch.object(vac, "USER_EXPLORER", Path(tmp) / "none"), \
                  patch.object(vac, "load_config", return_value=config), \
+                 patch.object(vac, "load_config_strict", return_value=(True, config, [])), \
                  contextlib.redirect_stdout(buf):
                 vac.cli_status()
             self.assertNotIn("Discord Cache", buf.getvalue(),
@@ -3349,6 +3503,7 @@ class TestCancelMutationGate(unittest.TestCase):
             self.assertEqual(log.n_deleted, 0)
 
     def test_cancel_before_retry_aborts(self):
+        """T-137/T-132: cancel after our chmod fails the next auth before the retry unlink."""
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             f = root / "deep" / "f.bin"
@@ -3361,10 +3516,13 @@ class TestCancelMutationGate(unittest.TestCase):
             plan = c._plan_file(f)
             self.assertIsNotNone(plan)
 
-            def set_cancel_sleep(*_a, **_k):
+            real_chmod = Path.chmod
+
+            def chmod_then_cancel(self, *a, **k):
+                real_chmod(self, *a, **k)
                 cancel.set()
 
-            with patch.object(vac.time, "sleep", side_effect=set_cancel_sleep), \
+            with patch.object(Path, "chmod", chmod_then_cancel), \
                  patch.object(Path, "unlink", side_effect=PermissionError), \
                  self.assertRaises(vac.CancelJobException):
                 c._apply_file_plan(f, plan[0], plan[1])
@@ -3451,6 +3609,254 @@ class TestProvenanceAudit(unittest.TestCase):
             for group, prov in vac.APP_PROCESSES_PROVENANCE.items():
                 if prov.startswith("unverified-exe") and group.lower() in text.lower():
                     self.fail(f"{doc} mentions unverified group '{group}' without a trust disclaimer")
+
+
+class TestEnvironmentPoisoning(unittest.TestCase):
+    """markhunt F: poisoned env roots cannot turn reviewed-target capability
+    into an authorization to wipe an arbitrary directory."""
+
+    def test_poisoned_localappdata_only_touches_the_reviewed_target_subpath(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            # a poisoned LOCALAPPDATA root with unrelated data
+            unrelated = root / "Poisoned" / "unrelated.txt"
+            unrelated.parent.mkdir(parents=True)
+            unrelated.write_text("keep me")
+            # the reviewed target is a FIXED subpath under the poisoned root
+            target = root / "Poisoned" / "NVIDIA" / "GLCache"
+            target.mkdir(parents=True)
+            (target / "junk.bin").write_bytes(b"x" * 50)
+            targets = {k: False for k in vac.SYSTEM_TARGET_DEFAULTS}
+            with patch.object(vac, "USER_APPDATA_TARGETS", [(target, "NVIDIA GL Cache", None)]), \
+                 patch.object(vac, "get_running_processes", return_value=set()), \
+                 patch.object(vac, "SYSTEM_TEMP", Path(tmp) / "none"), \
+                 patch.object(vac, "USER_TEMP", Path(tmp) / "none"), \
+                 patch.object(vac, "USER_CRASH", Path(tmp) / "none"), \
+                 patch.object(vac, "USER_EXPLORER", Path(tmp) / "none"):
+                cleaner = vac.SystemCleaner(False, vac.Logger(log_file=None, dry_run=False), targets=targets)
+                cleaner.run_all()
+            self.assertFalse((target / "junk.bin").exists(), "the reviewed NVIDIA GL Cache target is swept")
+            self.assertTrue(unrelated.exists(), "unrelated data under the poisoned root survives untouched")
+            self.assertTrue((root / "Poisoned").exists(), "the poisoned root itself is never removed")
+
+    def test_empty_env_vars_do_not_resolve_to_cwd_for_roots(self):
+        with patch.dict(os.environ, {"LOCALAPPDATA": "", "APPDATA": "", "TEMP": ""}, clear=False):
+            # get_env_path falls back to the given default, never silently to cwd
+            self.assertEqual(vac.get_env_path("LOCALAPPDATA", "C:/__nope__"), Path("C:/__nope__").resolve())
+
+
+class TestOracleFixture(unittest.TestCase):
+
+    """T-145: hand-built oracle, not parity-with-the-planner.
+
+    Fixture:
+      cache/a = 10 bytes   -> actionable
+      excluded/b = 20 bytes -> excluded via exclude_paths
+      protected/Cookies = 30 -> NEVER_DELETE name
+    Oracle: actionable set == {cache/a}, planned bytes == 10. Every surface must
+    match the ORACLE independently -- never 'equals the planner', which would
+    share any planner bug.
+    """
+
+    def _build(self, tmp):
+        root = Path(tmp)
+        cache = root / "cache"
+        cache.mkdir()
+        (cache / "a").write_bytes(b"x" * 10)
+        (root / "excluded").mkdir()
+        (root / "excluded" / "b").write_bytes(b"y" * 20)
+        (root / "Cookies").write_text("z" * 30)
+        return root, cache
+
+    def _plan(self, root, cache, exclude_paths):
+        log = vac.Logger(log_file=None, dry_run=True, quiet=True)
+        c = vac.CleanerEngine(True, log, vac.SafetyGuard(root, allow_shallow_system_target=True), root,
+                              exclude_paths=exclude_paths)
+        plan = c._plan_tree(cache, "cache")
+        return plan
+
+    def test_oracle_dry_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root, cache = self._build(tmp)
+            plan = self._plan(root, cache, [str(root / "excluded")])
+            self.assertEqual(plan["bytes"], 10, "oracle: only cache/a (10B) is actionable")
+            self.assertEqual([str(f) for f, _, _ in plan["files"]], [str(cache / "a")])
+
+    def test_oracle_status_and_dry_run_and_delete_planner_agree_with_oracle(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root, cache = self._build(tmp)
+            exclude_paths = [str(root / "excluded")]
+            # dry-run
+            dry = self._plan(root, cache, exclude_paths)
+            self.assertEqual(dry["bytes"], 10)
+            # status surface (SystemCleaner on an AppData-like target with the same exclusions)
+            targets = {k: False for k in vac.SYSTEM_TARGET_DEFAULTS}
+            targets["Discord Cache"] = True
+            with patch.object(vac, "USER_APPDATA_TARGETS", [(cache, "Discord Cache", "discord")]), \
+                 patch.object(vac, "get_running_processes", return_value=set()), \
+                 patch.object(vac, "SYSTEM_TEMP", Path(tmp) / "none"), \
+                 patch.object(vac, "USER_TEMP", Path(tmp) / "none"), \
+                 patch.object(vac, "USER_CRASH", Path(tmp) / "none"), \
+                 patch.object(vac, "USER_EXPLORER", Path(tmp) / "none"):
+                status = vac.calculate_target_sizes(targets, exclude_paths=exclude_paths)
+            self.assertEqual(status.get("Discord Cache"), 10, "status == oracle")
+            # delete planner (dry-run plan is the same planner used before apply)
+            del_log = vac.Logger(log_file=None, dry_run=False)
+            del_engine = vac.CleanerEngine(False, del_log, vac.SafetyGuard(root, allow_shallow_system_target=True), root,
+                                           exclude_paths=exclude_paths)
+            del_plan = del_engine._plan_tree(cache, "cache")
+            self.assertEqual(del_plan["bytes"], 10, "delete planner == oracle")
+            self.assertEqual(
+                sorted((str(f), sz) for f, sz, _ in dry["files"]),
+                sorted((str(f), sz) for f, sz, _ in del_plan["files"]),
+            )
+
+
+class TestAnalyzeCaches(unittest.TestCase):
+
+    """T-142: the analyzer is discovery-only, env-safe, link-safe, token-bound."""
+
+    def test_empty_env_never_falls_back_to_cwd(self):
+        with patch.dict(os.environ, {"LOCALAPPDATA": "", "APPDATA": ""}, clear=False):
+            self.assertIsNone(vac_analyze._root_env("LOCALAPPDATA"))
+            self.assertIsNone(vac_analyze._root_env("APPDATA"))
+
+    def test_missing_env_never_falls_back_to_cwd(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertIsNone(vac_analyze._root_env("LOCALAPPDATA"))
+
+    def test_nonexistent_root_rejected(self):
+        with patch.dict(os.environ, {"LOCALAPPDATA": "Z:/__no_such_dir__"}, clear=True):
+            self.assertIsNone(vac_analyze._root_env("LOCALAPPDATA"))
+
+    def test_token_boundary_matching(self):
+        self.assertTrue(vac_analyze._name_matches_token_boundary("cache"))
+        self.assertTrue(vac_analyze._name_matches_token_boundary("my cache"))
+        self.assertTrue(vac_analyze._name_matches_token_boundary("webcache"))
+        self.assertFalse(vac_analyze._name_matches_token_boundary("attempt"))  # 'temp' substring
+        self.assertFalse(vac_analyze._name_matches_token_boundary("accurate"))
+        self.assertFalse(vac_analyze._name_matches_token_boundary("important"))
+
+    def test_scan_is_strictly_read_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cache = root / "Cache"
+            cache.mkdir()
+            (cache / "big.bin").write_bytes(b"x" * (6 * 1024 * 1024))
+            with _ExplodeMutations():
+                found = vac_analyze._scan(root, verbose=False)
+            self.assertTrue(any("Cache" in p for p, _ in found))
+            self.assertTrue((cache / "big.bin").exists())
+
+    def test_symlink_root_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            outside = root / "outside"
+            outside.mkdir()
+            (outside / "Cache").mkdir()
+            (outside / "Cache" / "big.bin").write_bytes(b"x" * (6 * 1024 * 1024))
+            link = root / "link"
+            try:
+                link.symlink_to(outside, target_is_directory=True)
+            except (OSError, NotImplementedError):
+                self.skipTest("symlinks not supported")
+            found = vac_analyze._scan(link, verbose=False)
+            self.assertEqual(found, [], "a symlink root must be refused, never traversed")
+
+
+class TestConfigFailClosed(unittest.TestCase):
+    """T-138: a malformed EXISTING config must never authorize a destructive run."""
+
+    def _run_main_delete(self, cfg_text):
+        """Drive main() in DELETE mode against a config file; returns the exit code."""
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = Path(tmp) / "cleaner_config.json"
+            cfg.write_text(cfg_text, encoding="utf-8")
+            with patch.object(vac, "CONFIG_FILE", cfg), \
+                 patch.object(vac, "run_cleaning_job", side_effect=AssertionError("DELETE must not run on invalid config")), \
+                 patch.object(vac, "Logger"), \
+                 patch.object(vac, "get_running_processes", return_value=set()), \
+                 patch("_SMART_VAC_CLEANER.argparse.ArgumentParser.parse_args") as mock_parse:
+                mock_parse.return_value = MagicMock(
+                    dry_run=False, delete=True, portable=True, system=False, custom=False,
+                    all=False, cli=True, status=False, analyze_caches=False, hidden=False,
+                    sys_targets="", disable_targets="", exclude="", install_task=False, time="09:00")
+                try:
+                    vac.main()
+                    return 0
+                except SystemExit as e:
+                    return e.code
+
+    def test_malformed_json_aborts_delete(self):
+        code = self._run_main_delete("{corrupt")
+        self.assertEqual(code, 3)
+
+    def test_wrong_type_safety_fields_abort_delete(self):
+        cases = [
+            json.dumps({"portable_roots": "D:\\x"}),
+            json.dumps({"custom_rules": ["oops"]}),
+            json.dumps({"exclude_paths": "D:\\KEEP"}),
+            json.dumps({"exclude_patterns": "*.db"}),
+            json.dumps({"system_targets": []}),
+            json.dumps({"portable_roots": None}),
+            json.dumps({"exclude_paths": None}),
+            json.dumps({"custom_rules": 42}),
+            json.dumps({"exclude_patterns": [123]}),
+            json.dumps({"portable_roots": [1] * 100000}),  # huge list of wrong-typed scalars
+            json.dumps({"exclude_patterns": ["*.db"], "exclude_paths": ["D:\\Keep"],
+                        "custom_rules": [], "portable_roots": [], "system_targets": "oops"}),
+            "[1,2,3]",
+        ]
+        for cfg in cases:
+            code = self._run_main_delete(cfg)
+            self.assertEqual(code, 3, f"config {cfg[:60]!r} must abort DELETE (exit 3)")
+
+    def test_invalid_config_does_not_erase_other_fields_silently(self):
+        """One malformed field invalidates the WHOLE config for DELETE (no silent drop)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = Path(tmp) / "cleaner_config.json"
+            cfg.write_text(json.dumps({
+                "exclude_patterns": ["*.db"], "exclude_paths": ["D:\\Keep"],
+                "custom_rules": [{"path": "D:\\App", "pattern": "*"}],
+                "portable_roots": ["D:\\Portable"], "system_targets": "oops",
+            }), encoding="utf-8")
+            with patch.object(vac, "CONFIG_FILE", cfg):
+                valid, _, _errors = vac.load_config_strict()
+            self.assertFalse(valid)
+            self.assertTrue(any("system_targets" in e for e in _errors))
+
+    def test_fresh_missing_config_is_safe_default(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = Path(tmp) / "cleaner_config.json"
+            with patch.object(vac, "CONFIG_FILE", cfg):
+                valid, data, _errors = vac.load_config_strict()
+            self.assertTrue(valid)
+            self.assertEqual(data["exclude_patterns"], [])
+            self.assertTrue(cfg.exists(), "fresh missing config is created")
+
+    def test_dry_run_reports_invalid_config_but_does_not_fake_policy(self):
+        """Dry-run with an invalid config logs the error and runs with empty policy, never deleting."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cfg = Path(tmp) / "cleaner_config.json"
+            cfg.write_text(json.dumps({"exclude_patterns": "*.db"}), encoding="utf-8")
+            (root / "portable").mkdir()
+            (root / "portable" / "keep.bin").write_bytes(b"x" * 10)
+            buf = io.StringIO()
+            with patch.object(vac, "CONFIG_FILE", cfg), \
+                 patch.object(vac, "get_running_processes", return_value=set()), \
+                 contextlib.redirect_stdout(buf), \
+                 patch("_SMART_VAC_CLEANER.argparse.ArgumentParser.parse_args") as mock_parse:
+                mock_parse.return_value = MagicMock(
+                    dry_run=True, delete=True, portable=True, system=False, custom=False,
+                    all=False, cli=True, status=False, analyze_caches=False, hidden=False,
+                    sys_targets="", disable_targets="", exclude="", install_task=False, time="09:00")
+                try:
+                    vac.main()
+                except SystemExit:
+                    pass
+            self.assertIn("config invalid", buf.getvalue().lower())
+            self.assertTrue((root / "portable" / "keep.bin").exists())
 
 
 class TestGuiJobFreeze(unittest.TestCase):

@@ -59,7 +59,7 @@ import customtkinter as ctk
 
 
 
-VERSION = "2.6.7"
+VERSION = "2.6.8"
 
 DEFAULT_THREADS = 12
 
@@ -71,8 +71,27 @@ if getattr(sys, "frozen", False):
 else:
     BASE_DIR = SCRIPT_PATH.parent
 
-CONFIG_FILE = BASE_DIR / "cleaner_config.json"
+# T-139: writable persistence root differs by deployment. A frozen portable exe
+# keeps config/logs next to the exe; a source checkout keeps them next to the
+# source; an INSTALLED wheel (module in site-packages) must NOT write user data
+# into site-packages -- it uses the per-user %LOCALAPPDATA%\SmartVACCleaner
+# (may be read-only / shared). SMARTVAC_DATA_DIR overrides the root explicitly
+# (tests, CI, unusual deployments).
+if os.environ.get("SMARTVAC_DATA_DIR"):
+    DATA_DIR = Path(os.environ["SMARTVAC_DATA_DIR"]).resolve()
+elif getattr(sys, "frozen", False):
+    DATA_DIR = BASE_DIR
+elif "site-packages" in str(BASE_DIR).lower():
+    DATA_DIR = Path(os.environ.get("LOCALAPPDATA") or Path.home()) / "SmartVACCleaner"
+else:
+    DATA_DIR = BASE_DIR
 
+CONFIG_FILE = DATA_DIR / "cleaner_config.json"
+
+LOGS_DIR = DATA_DIR / "logs"
+
+# Locale resources stay readable wherever the MODULE lives (site-packages
+# included), independent of the writable data root (T-139).
 STRINGS_DIR = BASE_DIR / "strings"
 
 DEFAULT_STRINGS: dict[str, str] = {
@@ -492,7 +511,13 @@ CHROMIUM_USERDATA_FILES = ["BrowserMetrics-spare.pma"]
 
 def get_env_path(var_name: str, fallback: str) -> Path:
 
-    val = os.environ.get(var_name, fallback)
+    """Resolve an env var to a canonical path, or the fallback.
+
+    An EMPTY or missing env value uses the fallback -- never the cwd
+    (markhunt F: Path('') is the current working directory).
+    """
+
+    val = os.environ.get(var_name) or fallback
 
     return Path(val).resolve()
 
@@ -881,7 +906,7 @@ def _capture_identity(path: Path) -> dict | None:
     return ident
 
 
-def _identity_matches(planned: dict | None, current: dict | None) -> bool:
+def _identity_matches(planned: dict | None, current: dict | None, ignore_attrs: bool = False) -> bool:
     """True ONLY when `current` provably describes the same object as `planned`.
 
     Inode identity wins when both sides carry one. If exactly one side has an
@@ -889,6 +914,11 @@ def _identity_matches(planned: dict | None, current: dict | None) -> bool:
     equality means object equality). Without inodes a conservative fingerprint
     (size + mtime + ctime + attrs) is compared; ANY mismatch refuses. A
     missing side always refuses.
+
+    `ignore_attrs` (T-137) is reserved for the cleaner's OWN attribute
+    mutation: after we chmod away read-only, only the attrs differ from the
+    plan, so the re-baseline check must ignore that one field while every
+    mutation-stable field (dev/ino/ctime/size/mtime) still must match.
     """
     if not planned or not current:
         return False
@@ -902,6 +932,8 @@ def _identity_matches(planned: dict | None, current: dict | None) -> bool:
     if p_ino or c_ino:
         return False
     for key in ("size", "mtime_ns", "ctime_ns", "attrs"):
+        if ignore_attrs and key == "attrs":
+            continue
         if planned.get(key) != current.get(key):
             return False
     return True
@@ -1246,10 +1278,12 @@ class SafetyGuard:
                 pass
 
 
-        if ".." in path.parts:
-
-            return False, "Path contains '..' component"
-
+        # T-144: '..' segments were already canonicalized by _canon() at the top
+        # of is_safe, so no raw '..' part can reach here. The resolved path is
+        # confined by the relative_to(base_root) check above -- a '..' that
+        # would escape the target root is refused there. There is deliberately
+        # no separate '..' part check: it would be a dead check claiming a
+        # safety layer (docs say canonicalized + confined, not '.. refused').
 
         return True, "OK"
 
@@ -1472,32 +1506,55 @@ class CleanerEngine:
 
 
     def _apply_file_plan(self, path: Path, size: int, identity) -> MutationResult:
-        """REAL delete of a single file (F1/F7).
+        """REAL delete of a single file (F1/F7/T-137).
 
         MUTATES the filesystem. MUST be unreachable when dry_run is True.
-        The mutation authorization gate runs immediately before chmod/unlink.
-        Returns a structured MutationResult; success is independent of bytes
-        freed (an empty file is a successful zero-byte delete).
+
+        T-137: EVERY filesystem mutation gets its OWN immediately-adjacent
+        authorization. Never `authorize -> chmod -> unlink` under one auth:
+          attempt 1: authorize -> unlink directly (no chmod).
+          PermissionError (read-only) -> authorize -> chmod ->
+                     re-baseline the expected identity after OUR chmod
+                     (mutation-stable fields must still match the plan) ->
+                     attempt 2: authorize -> unlink.
+        Cancellation is part of the gate (check_cancel runs inside
+        _authorize_mutation), so a cancel set at any boundary fails the auth
+        before the next mutation.
         """
-        ok, reason = self._authorize_mutation(path, identity)
-        if not ok:
-            self.log.skipped(path, reason)
-            return MutationResult(False, 0, reason)
         for attempt in range(2):
             ok, reason = self._authorize_mutation(path, identity)
             if not ok:
                 self.log.skipped(path, reason)
                 return MutationResult(False, 0, reason)
             try:
-                path.chmod(0o666)
                 path.unlink()
                 return MutationResult(True, size)
             except PermissionError:
-                if attempt == 0:
-                    time.sleep(0.01)  # Windows Defender micro-lock backoff
-                else:
+                if attempt == 1:
                     self.log.skipped(path, "File locked by another process")
                     return MutationResult(False, 0, "File locked by another process")
+                # read-only attribute blocks unlink: clear it under its OWN auth
+                ok, reason = self._authorize_mutation(path, identity)
+                if not ok:
+                    self.log.skipped(path, reason)
+                    return MutationResult(False, 0, reason)
+                try:
+                    path.chmod(0o666)
+                except OSError:
+                    self.log.skipped(path, "File in use or access denied")
+                    return MutationResult(False, 0, "File in use or access denied")
+                # Our chmod changed the attributes; re-baseline the expected
+                # identity so the next authorize can only fail on a REAL change
+                # since our own mutation. The object must still match the ORIGINAL
+                # plan on every mutation-stable field (dev/ino/ctime/size/mtime) --
+                # if an attacker swapped the file in the auth->chmod window, the
+                # recapture differs from the plan and we refuse (T-137).
+                recaptured = _capture_identity(path)
+                if not recaptured or not _identity_matches(identity, recaptured, ignore_attrs=True):
+                    self.log.skipped(path, "Object identity changed since planning")
+                    return MutationResult(False, 0, "Object identity changed since planning")
+                identity = recaptured
+                continue
             except Exception:
                 self.log.skipped(path, "File in use or access denied")
                 return MutationResult(False, 0, "File in use or access denied")
@@ -1672,29 +1729,32 @@ class CleanerEngine:
             if d in plan["protected"]:
                 continue
             self.check_cancel()
-            ok, reason = self._authorize_mutation(d, ident)
-            if not ok:
-                self.log.skipped(d, reason)
-                fully = False
-                continue
+            # T-137: the emptiness check runs FIRST, then a FRESH authorization is
+            # immediately adjacent to the rmdir -- nothing but the mutation itself
+            # may sit between the final auth and the destructive call.
             try:
                 if not any(d.iterdir()):
+                    ok, reason = self._authorize_mutation(d, ident)
+                    if not ok:
+                        self.log.skipped(d, reason)
+                        fully = False
+                        continue
                     d.rmdir()
             except OSError:
                 fully = False
         if fully:
-            ok, reason = self._authorize_mutation(root, root_identity)
-            if not ok:
-                self.log.skipped(root, reason)
-                fully = False
-            else:
-                try:
-                    if not any(root.iterdir()):
-                        root.rmdir()
-                    else:
+            try:
+                if not any(root.iterdir()):
+                    ok, reason = self._authorize_mutation(root, root_identity)
+                    if not ok:
+                        self.log.skipped(root, reason)
                         fully = False
-                except OSError:
+                    else:
+                        root.rmdir()
+                else:
                     fully = False
+            except OSError:
+                fully = False
         return freed, fully
 
 
@@ -2962,7 +3022,30 @@ def sanitize_roots(raw_roots) -> tuple[list[str], list[str]]:
 
 def load_config() -> dict:
 
-    default_cfg = {
+    """Tolerant loader for display/GUI (never used to authorize a DELETE).
+
+    A missing config creates the default safely. An EXISTING but malformed
+    config yields the default snapshot with the errors logged loudly -- the
+    destructive boundary must use load_config_strict() so it can fail closed
+    instead of silently running with empty exclusions/policy (T-138).
+    """
+
+    valid, cfg, errors = _load_and_validate()
+
+    if not valid:
+
+        for e in errors:
+
+            logging.getLogger("vac_cleaner").warning(f"Config invalid: {e}")
+
+        return _default_config()
+
+    return cfg
+
+
+def _default_config() -> dict:
+
+    return {
 
         "custom_rules": [],
 
@@ -2982,6 +3065,23 @@ def load_config() -> dict:
 
     }
 
+
+def load_config_strict() -> tuple[bool, dict, list[str]]:
+    """(valid, config, errors) for the destructive job boundary (T-138).
+
+    Fresh MISSING config -> (True, defaults, []) -- creating a default is safe.
+    An EXISTING malformed config -> (False, {}, errors): the DELETE path MUST
+    NOT run a destructive job with silently-empty exclusions/policy. Each
+    safety-critical field is validated independently, so one malformed field
+    can never silently erase the others.
+    """
+    return _load_and_validate()
+
+
+def _load_and_validate() -> tuple[bool, dict, list[str]]:
+
+    default_cfg = _default_config()
+
     if not CONFIG_FILE.exists():
 
         try:
@@ -2994,7 +3094,7 @@ def load_config() -> dict:
 
             pass  # read-only FS: config stays in-memory only
 
-        return default_cfg
+        return True, default_cfg, []
 
     try:
 
@@ -3002,79 +3102,120 @@ def load_config() -> dict:
 
             data = json.load(f)
 
-            if "profiles" in data:
+    except (OSError, ValueError) as exc:
 
-                del data["profiles"]
+        return False, {}, [f"config file unreadable or not valid JSON: {exc}"]
 
-                try:
+    # explicit per-field type validation (T-138): a wrong type in any
+    # safety-critical field invalidates the WHOLE existing config for DELETE.
+    errors: list[str] = []
 
-                    with open(CONFIG_FILE, "w", encoding="utf-8") as f2:
+    if not isinstance(data, dict):
 
-                        json.dump(data, f2, indent=4)
+        return False, {}, ["config root must be a JSON object"]
 
-                except OSError:
+    if not isinstance(data.get("portable_roots", []), list) or any(not isinstance(r, str) for r in data.get("portable_roots", [])):
+        errors.append("portable_roots must be a list of path strings")
 
-                    pass  # migration persist is best-effort
+    rules = data.get("custom_rules", [])
+    if not isinstance(rules, list):
+        errors.append("custom_rules must be a list of rule objects")
+    else:
+        for i, r in enumerate(rules):
+            if not isinstance(r, dict) or not isinstance(r.get("path"), str):
+                errors.append(f"custom_rules[{i}] must be an object with a string 'path'")
 
-            if "portable_roots" not in data:
+    ep = data.get("exclude_patterns", [])
+    if not isinstance(ep, list) or any(not isinstance(p, str) for p in ep):
+        errors.append("exclude_patterns must be a list of strings")
 
-                data["portable_roots"] = default_cfg["portable_roots"]
+    xp = data.get("exclude_paths", [])
+    if not isinstance(xp, list) or any(not isinstance(p, str) for p in xp):
+        errors.append("exclude_paths must be a list of strings")
 
-            roots, root_rejects = sanitize_roots(data.get("portable_roots", []))
+    st = data.get("system_targets", {})
+    if not isinstance(st, dict) or any(not isinstance(k, str) or not isinstance(v, bool) for k, v in st.items()):
+        errors.append("system_targets must be an object mapping target names to booleans")
 
-            data["portable_roots"] = roots
+    if not isinstance(data.get("auto_clean_interval_hours", 0), (int, float)):
+        errors.append("auto_clean_interval_hours must be a number")
 
-            for r in root_rejects:
+    if not isinstance(data.get("lang", "en"), str):
+        errors.append("lang must be a string")
 
-                logging.getLogger("vac_cleaner").warning(f"Portable root rejected: {r}")
+    if not isinstance(data.get("window_geometry", ""), str):
+        errors.append("window_geometry must be a string")
 
-            rules = []
+    if errors:
+        return False, {}, errors
 
-            for rule in data.get("custom_rules", []):
+    if "profiles" in data:
 
-                p = normalize_path(rule.get("path", ""))
+        del data["profiles"]
 
-                if p is None:
+        try:
 
-                    logging.getLogger("vac_cleaner").warning(f"Custom rule dropped (invalid path): {rule.get('path')!r}")
+            with open(CONFIG_FILE, "w", encoding="utf-8") as f2:
 
-                    continue
+                json.dump(data, f2, indent=4)
 
-                if is_path_blacklisted(p):
+        except OSError:
 
-                    logging.getLogger("vac_cleaner").warning(f"Custom rule dropped (protected path): {p}")
+            pass  # migration persist is best-effort
 
-                    continue
+    if "portable_roots" not in data:
 
-                rules.append({**rule, "path": str(p)})
+        data["portable_roots"] = default_cfg["portable_roots"]
 
-            data["custom_rules"] = rules
+    roots, root_rejects = sanitize_roots(data.get("portable_roots", []))
 
-            data["exclude_paths"] = [str(p) for p in (normalize_path(ep) for ep in data.get("exclude_paths", [])) if p is not None]
+    data["portable_roots"] = roots
 
-            raw_st = data.get("system_targets")
+    for r in root_rejects:
 
-            if not isinstance(raw_st, dict):
+        logging.getLogger("vac_cleaner").warning(f"Portable root rejected: {r}")
 
-                raw_st = {}
+    rules = []
 
-                data["system_targets"] = {}
+    for rule in data.get("custom_rules", []):
 
-            for name in raw_st:
+        p = normalize_path(rule.get("path", ""))
 
-                if name not in SYSTEM_TARGET_DEFAULTS:
+        if p is None:
 
-                    logging.getLogger("vac_cleaner").warning(f"Unknown system target in config dropped: {name}")
+            logging.getLogger("vac_cleaner").warning(f"Custom rule dropped (invalid path): {rule.get('path')!r}")
 
-            data["system_targets"] = {k: bool(v) for k, v in raw_st.items() if k in SYSTEM_TARGET_DEFAULTS}
+            continue
 
-            return data
+        if is_path_blacklisted(p):
 
-    except Exception:
+            logging.getLogger("vac_cleaner").warning(f"Custom rule dropped (protected path): {p}")
 
-        logging.getLogger("vac_cleaner").warning(f"Config file corrupted or unreadable: {CONFIG_FILE} - falling back to defaults")
+            continue
 
-        return default_cfg
+        rules.append({**rule, "path": str(p)})
+
+    data["custom_rules"] = rules
+
+    data["exclude_paths"] = [str(p) for p in (normalize_path(ep) for ep in data.get("exclude_paths", [])) if p is not None]
+
+    raw_st = data.get("system_targets")
+
+    if not isinstance(raw_st, dict):
+
+        raw_st = {}
+
+        data["system_targets"] = {}
+
+    for name in raw_st:
+
+        if name not in SYSTEM_TARGET_DEFAULTS:
+
+            logging.getLogger("vac_cleaner").warning(f"Unknown system target in config dropped: {name}")
+
+    data["system_targets"] = {k: bool(v) for k, v in raw_st.items() if k in SYSTEM_TARGET_DEFAULTS}
+
+    return True, data, []
 
 
 def parse_geometry(geom: str, default: str = "960x640", min_w: int = 800, min_h: int = 500) -> str:
@@ -3089,7 +3230,13 @@ def parse_geometry(geom: str, default: str = "960x640", min_w: int = 800, min_h:
     return f"{w}x{h}{m.group(3) or ''}{m.group(4) or ''}"
 
 
-def save_config(config: dict) -> None:
+def save_config(config: dict) -> bool:
+    """Persist config atomically. Returns True on success (T-141).
+
+    Callers must treat a False result as a persistence failure and must NOT
+    report "saved" / close editors over it -- a silent drop would make the user
+    believe their exclusions/targets are active when they are not.
+    """
 
     try:
 
@@ -3101,8 +3248,11 @@ def save_config(config: dict) -> None:
 
         tmp_file.replace(CONFIG_FILE)
 
+        return True
+
     except Exception as e:
         logging.getLogger("vac_cleaner").warning(f"Failed to save config: {e}")
+        return False
 
 
 # PROGRESS TRACKER
@@ -3331,7 +3481,11 @@ def cli_status():
     and runs the shared dry-run planner. The candidate truth is identical to a
     dry-run for the same snapshot/config.
     """
-    config = load_config()
+    valid, config, config_errors = load_config_strict()
+    if not valid:
+        for e in config_errors:
+            print(f"Warning: config invalid - {e}")
+        config = _default_config()
     spec = resolve_job_spec(dry_run=True, run_portable=True, run_system=True, run_custom=True,
                             config=config, surface="status")
     print(f"Smart VAC Cleaner v{VERSION}")
@@ -3555,7 +3709,7 @@ class App(ctk.CTk):
 
     def _run_job(self, spec):
         try:
-            log = Logger(BASE_DIR/"logs"/f"clean_{datetime.now().astimezone():%Y%m%d_%H%M%S}.log", spec.dry_run, gui_callback=self._log)
+            log = Logger(LOGS_DIR/f"clean_{datetime.now().astimezone():%Y%m%d_%H%M%S}.log", spec.dry_run, gui_callback=self._log)
             # T-126/T-128: the worker consumes ONLY the frozen JobSpec. It never
             # reads self.config / self.sys_targets after start.
             run_cleaning_job(spec, log, cancel_event=self.cancel_event, progress=self.progress)
@@ -3798,7 +3952,11 @@ class App(ctk.CTk):
         paths = [str(Path(p)) for p in lb.get(0, 'end') if str(p).strip()]
         self.config['exclude_patterns'] = pats
         self.config['exclude_paths'] = paths
-        save_config(self.config)
+        # T-141: on a persistence failure the dialog stays open and the user is
+        # told -- never a false "saved" over a silently-dropped config.
+        if not save_config(self.config):
+            self._log("Error: could not save exclusions (config not writable)")
+            return
         win.destroy()
         self._log(self.T["exc_saved"])
 
@@ -3835,7 +3993,9 @@ class App(ctk.CTk):
         for name, var in self.syst_vars.items():
             self.sys_targets[name] = bool(var.get())
         self.config["system_targets"] = dict(self.sys_targets)
-        save_config(self.config)
+        if not save_config(self.config):
+            self._log("Error: could not save system targets (config not writable)")
+            return
         win.destroy()
         self._log(self.T["syst_saved"])
 
@@ -4009,7 +4169,16 @@ def main():
     if args.cli or args.portable or args.system or args.custom or args.all:
         if args.hidden:
             _hide_console()
-        config = load_config()
+        # T-138: an existing but malformed config must NEVER authorize a
+        # destructive run with silently-empty exclusions/policy.
+        valid, config, config_errors = load_config_strict()
+        if not valid:
+            if not dry_run:
+                print("Config error - refusing to run a destructive job:", "; ".join(config_errors))
+                sys.exit(3)
+            for e in config_errors:
+                print(f"Warning: config invalid - {e}")
+            config = _default_config()
         rp = args.portable or args.all
         rs = args.system or args.all
         rc = args.custom or args.all
@@ -4033,7 +4202,7 @@ def main():
                                 config=config, cli_excludes=ep,
                                 cli_enable=enables, cli_disable=disables, surface="cli")
         log = Logger(
-            BASE_DIR / "logs" / f"clean_{datetime.now().astimezone():%Y%m%d_%H%M%S}.log",
+            LOGS_DIR / f"clean_{datetime.now().astimezone():%Y%m%d_%H%M%S}.log",
             dry_run
         )
         run_cleaning_job(spec, log)

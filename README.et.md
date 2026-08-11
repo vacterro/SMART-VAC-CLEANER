@@ -24,7 +24,7 @@ Puuduvad kettad jäetakse vaikselt vahele, vigu ei teki kunagi.
 - **Must nimekiri**: `C:\`, `C:\Windows`, kasutajaprofiil, Program Files, programmi enda kaust — kasutaja-antud (portable/custom) juur ei tohi kunagi olla kaitstud tee ega selle alamkaust; sisemised ülevaadatud süsteemi sihtmärgid on eraldi ulatusega ja piirduvad oma SafetyGuard juuriga
 - **Minimaalne tee sügavus**: madalad teed (vähem kui 5 komponenti) lükatakse tagasi
 - **Käivate protsesside kontroll**: rakendus, mis sihtmärki kasutab, jäetakse vahele
-- **Sümbollingid ja `..` lükatakse tagasi**
+- **Sümbollingid ja `..`**: sümbollingid lükatakse tagasi; `..` segmendid kanoniseeritakse ning saadud tee piiratakse sihtmärgijuuriga ja kontrollitakse uuesti — juurest välja viiv `..` lükatakse tagasi
 - **Never-delete nimed**: `login data`, `bookmarks`, `cookies`, `database` jne.
 - **Erandid**: `exclude_patterns` / `exclude_paths` konfigis
 - Iga kustutamine läbib oma juure `SafetyGuard`i; vead loendatakse, pole kunagi saatuslikud
