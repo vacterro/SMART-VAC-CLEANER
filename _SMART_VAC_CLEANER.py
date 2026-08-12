@@ -514,7 +514,9 @@ def get_env_path(var_name: str, fallback: str) -> Path:
     """Resolve an env var to a canonical path, or the fallback.
 
     An EMPTY or missing env value uses the fallback -- never the cwd
-    (markhunt F: Path('') is the current working directory).
+    (markhunt F: Path('') is the current working directory). This is safe only
+    for NON-destructive display purposes; destructive system roots MUST go
+    through _resolve_env_root() (T-147).
     """
 
     val = os.environ.get(var_name) or fallback
@@ -522,187 +524,315 @@ def get_env_path(var_name: str, fallback: str) -> Path:
     return Path(val).resolve()
 
 
-SYSTEM_TEMP = Path(os.environ.get("windir", r"C:\Windows")) / "Temp"
+# T-147: a dynamic environment value is NEVER a trusted system target. Every
+# env-derived destructive root must pass provenance validation before it can
+# receive the shallow system-target capability. Invalid/uncertain => None
+# (target disabled), never a fallback to the cwd or to an arbitrary location.
+def _is_under(ancestor: Path, child: Path) -> bool:
+    try:
+        child.relative_to(ancestor)
+        return True
+    except ValueError:
+        return False
 
-USER_TEMP = get_env_path("TEMP", r"C:\Temp")
 
-USER_CRASH = get_env_path("LOCALAPPDATA", r"C:\Temp") / "CrashDumps"
+def _real_user_profile() -> Path | None:
+    """Canonical existing user profile dir, or None (fail closed)."""
+    raw = os.environ.get("USERPROFILE") or os.environ.get("HOME")
+    if not raw or not raw.strip():
+        return None
+    try:
+        p = Path(raw.strip()).expanduser().resolve()
+    except OSError:
+        return None
+    if not p.is_dir():
+        return None
+    return p
 
-USER_EXPLORER = get_env_path("LOCALAPPDATA", r"C:\Temp") / "Microsoft" / "Windows" / "Explorer"
+
+def _resolve_env_root(var: str, expected: Path | None = None, exact: bool = False) -> Path | None:
+    """Validate + resolve a destructive system-root env var (T-147).
+
+    Returns a canonical absolute Path, or None when the value is unsafe:
+      missing / empty / relative / drive-or-filesystem root / the cwd / inside
+      the cleaner's own tree / outside the expected location class.
+    None => the derived target is DISABLED, never redirected. `expected` is the
+    location class the value must belong to (exact= must equal it); a missing
+    expected class means the whole class is uncertain -> fail closed.
+    """
+    raw = os.environ.get(var)
+    if not raw or not raw.strip():
+        return None
+    try:
+        p = Path(raw.strip()).expanduser().resolve()
+    except OSError:
+        return None
+    if not p.is_absolute():
+        return None
+    if len(p.parts) <= 1:
+        return None  # drive root (C:\)
+    try:
+        if p == Path.cwd().resolve():
+            return None  # arbitrary cwd is not a trusted root
+    except OSError:
+        return None
+    if _is_under(BASE_DIR, p):
+        return None  # cleaner's own directory tree
+    if expected is None:
+        return None  # expected location class unknown -> uncertain
+    if exact:
+        if p != expected:
+            return None
+    elif not _is_under(expected, p):
+        return None  # wrong location class (poisoned to an arbitrary dir)
+    return p
+
+
+def _rooted(base: Path | None, *parts: str) -> Path | None:
+    """Join a validated root with suffix parts; a None root stays None (disabled)."""
+    if base is None:
+        return None
+    return base.joinpath(*parts)
+
+
+def _resolve_temp_root() -> Path | None:
+    """Validate the USER TEMP root (T-147).
+
+    TEMP may legitimately live on another drive (e.g. V:\\_TEMP_), so unlike
+    APPDATA/LOCALAPPDATA it is not required to sit under the user profile --
+    but an arbitrary directory must never be accepted: the value must be an
+    absolute, non-root, non-cwd, non-cleaner path that is EITHER under the
+    user profile OR has a temp-like name. Anything else -> None (disabled).
+    """
+    raw = os.environ.get("TEMP")
+    if not raw or not raw.strip():
+        return None
+    try:
+        p = Path(raw.strip()).expanduser().resolve()
+    except OSError:
+        return None
+    if not p.is_absolute() or len(p.parts) <= 1:
+        return None
+    try:
+        if p == Path.cwd().resolve():
+            return None
+    except OSError:
+        return None
+    if _is_under(BASE_DIR, p):
+        return None
+    profile = _real_user_profile()
+    if profile is not None and _is_under(profile, p):
+        return p
+    base = p.name.lower()
+    if base == "temp" or base == "tmp" or base.startswith("temp") or "_temp" in base or "temp_" in base:
+        return p
+    return None
+
+
+SYSTEM_TEMP = _rooted(_resolve_env_root("windir",
+                                       Path(os.environ.get("SystemRoot") or r"C:\Windows").resolve(),
+                                       exact=True), "Temp")
+
+USER_TEMP = _resolve_temp_root()
+
+_LOCALAPPDATA = _resolve_env_root("LOCALAPPDATA",
+                                  _rooted(_real_user_profile(), "AppData", "Local"),
+                                  exact=True)
+
+_APPDATA = _resolve_env_root("APPDATA",
+                             _rooted(_real_user_profile(), "AppData", "Roaming"),
+                             exact=True)
+
+USER_CRASH = _rooted(_LOCALAPPDATA, "CrashDumps")
+
+USER_EXPLORER = _rooted(_LOCALAPPDATA, "Microsoft", "Windows", "Explorer")
+
+
+# T-147: poisoned/absent env roots become impossible relative SENTINEL paths so
+# the AppData target list still builds (Path/ never sees None); entries rooted
+# in a sentinel are filtered out of the live target list below.
+_INVALID_LOCAL = Path("__INVALID_LOCALAPPDATA__")
+_INVALID_ROAM = Path("__INVALID_APPDATA__")
+
+_LOCALAPPDATA = _LOCALAPPDATA if _LOCALAPPDATA is not None else _INVALID_LOCAL
+_APPDATA = _APPDATA if _APPDATA is not None else _INVALID_ROAM
+
+USER_CRASH = (_LOCALAPPDATA / "CrashDumps") if _LOCALAPPDATA is not _INVALID_LOCAL else None
+USER_EXPLORER = (_LOCALAPPDATA / "Microsoft" / "Windows" / "Explorer") if _LOCALAPPDATA is not _INVALID_LOCAL else None
 
 
 # Deep System & App Caches
 
 USER_APPDATA_TARGETS = [
 
-    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "NVIDIA" / "GLCache", "NVIDIA GL Cache"),
+    (_LOCALAPPDATA / "NVIDIA" / "GLCache", "NVIDIA GL Cache"),
 
-    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "NVIDIA" / "DXCache", "NVIDIA DX Cache"),
+    (_LOCALAPPDATA / "NVIDIA" / "DXCache", "NVIDIA DX Cache"),
 
-    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "D3DSCache", "DirectX Shader Cache"),
+    (_LOCALAPPDATA / "D3DSCache", "DirectX Shader Cache"),
 
-    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "Steam" / "htmlcache", "Steam Web Cache"),
+    (_LOCALAPPDATA / "Steam" / "htmlcache", "Steam Web Cache"),
 
-    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "Microsoft" / "Windows" / "INetCache", "Windows INetCache"),
+    (_LOCALAPPDATA / "Microsoft" / "Windows" / "INetCache", "Windows INetCache"),
 
-    (get_env_path("APPDATA", r"C:\Temp") / "discord" / "Cache", "Discord Cache"),
+    (_APPDATA / "discord" / "Cache", "Discord Cache"),
 
-    (get_env_path("APPDATA", r"C:\Temp") / "discord" / "Code Cache", "Discord Code Cache"),
+    (_APPDATA / "discord" / "Code Cache", "Discord Code Cache"),
 
 ]
 
 USER_APPDATA_TARGETS.extend([
     # dev tool caches (LocalAppData)
-    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "npm-cache", "npm Cache"),
-    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "uv" / "cache", "uv Cache"),
-    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "pip" / "cache", "pip Cache"),
-    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "Nuitka", "Nuitka Cache"),
-    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "node-gyp" / "Cache", "node-gyp Cache"),
-    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "python" / "Cache", "python Cache"),
-    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "Cypress" / "Cache", "Cypress Cache"),
+    (_LOCALAPPDATA / "npm-cache", "npm Cache"),
+    (_LOCALAPPDATA / "uv" / "cache", "uv Cache"),
+    (_LOCALAPPDATA / "pip" / "cache", "pip Cache"),
+    (_LOCALAPPDATA / "Nuitka", "Nuitka Cache"),
+    (_LOCALAPPDATA / "node-gyp" / "Cache", "node-gyp Cache"),
+    (_LOCALAPPDATA / "python" / "Cache", "python Cache"),
+    (_LOCALAPPDATA / "Cypress" / "Cache", "Cypress Cache"),
     # app logs (Roaming)
-    (get_env_path("APPDATA", r"C:\ProgramData") / "Maxon" / "Logs", "Maxon Logs"),
-    (get_env_path("APPDATA", r"C:\ProgramData") / "Maxon" / "Temp", "Maxon Temp"),
-    (get_env_path("APPDATA", r"C:\ProgramData") / "FreeFileSync" / "Logs", "FreeFileSync Logs"),
-    (get_env_path("APPDATA", r"C:\ProgramData") / "obs-studio" / "logs", "obs-studio Logs"),
-    (get_env_path("APPDATA", r"C:\ProgramData") / "Google" / "DriveFS" / "Logs", "DriveFS Logs"),
-    (get_env_path("APPDATA", r"C:\ProgramData") / "Mega Limited" / "MEGAsync" / "Logs", "MEGAsync Logs"),
-    (get_env_path("APPDATA", r"C:\ProgramData") / "discord" / "Logs", "discord Logs"),
-    (get_env_path("APPDATA", r"C:\ProgramData") / "discord" / "module_data" / "crashlogs", "discord Crash Logs"),
-    (get_env_path("APPDATA", r"C:\ProgramData") / "Claude" / "Logs", "Claude Logs"),
-    (get_env_path("APPDATA", r"C:\ProgramData") / "Listary" / "UserProfile" / "Cache", "Listary Cache"),
+    (_APPDATA / "Maxon" / "Logs", "Maxon Logs"),
+    (_APPDATA / "Maxon" / "Temp", "Maxon Temp"),
+    (_APPDATA / "FreeFileSync" / "Logs", "FreeFileSync Logs"),
+    (_APPDATA / "obs-studio" / "logs", "obs-studio Logs"),
+    (_APPDATA / "Google" / "DriveFS" / "Logs", "DriveFS Logs"),
+    (_APPDATA / "Mega Limited" / "MEGAsync" / "Logs", "MEGAsync Logs"),
+    (_APPDATA / "discord" / "Logs", "discord Logs"),
+    (_APPDATA / "discord" / "module_data" / "crashlogs", "discord Crash Logs"),
+    (_APPDATA / "Claude" / "Logs", "Claude Logs"),
+    (_APPDATA / "Listary" / "UserProfile" / "Cache", "Listary Cache"),
     # Eagle
-    (get_env_path("APPDATA", r"C:\ProgramData") / "Eagle" / "eagle-temp", "Eagle Temp"),
-    (get_env_path("APPDATA", r"C:\ProgramData") / "Eagle" / "Cache", "Eagle Cache"),
-    (get_env_path("APPDATA", r"C:\ProgramData") / "Eagle" / "library-caches", "Eagle Library Caches"),
-    (get_env_path("APPDATA", r"C:\ProgramData") / "Eagle" / "Crashpad", "Eagle Crashpad"),
+    (_APPDATA / "Eagle" / "eagle-temp", "Eagle Temp"),
+    (_APPDATA / "Eagle" / "Cache", "Eagle Cache"),
+    (_APPDATA / "Eagle" / "library-caches", "Eagle Library Caches"),
+    (_APPDATA / "Eagle" / "Crashpad", "Eagle Crashpad"),
     # VS Code family
-    (get_env_path("APPDATA", r"C:\ProgramData") / "Code" / "CachedExtensionVSIXs", "VS Code VSIX Cache"),
-    (get_env_path("APPDATA", r"C:\ProgramData") / "Code" / "Crashpad", "VS Code Crashpad"),
-    (get_env_path("APPDATA", r"C:\ProgramData") / "Code" / "CachedData", "VS Code CachedData"),
-    (get_env_path("APPDATA", r"C:\ProgramData") / "Code" / "Cache", "VS Code Cache"),
-    (get_env_path("APPDATA", r"C:\ProgramData") / "Antigravity" / "CachedExtensionVSIXs", "Antigravity VSIX Cache"),
-    (get_env_path("APPDATA", r"C:\ProgramData") / "Antigravity" / "Cache", "Antigravity Cache"),
-    (get_env_path("APPDATA", r"C:\ProgramData") / "Antigravity" / "CachedData", "Antigravity CachedData"),
-    (get_env_path("APPDATA", r"C:\ProgramData") / "Claude" / "Cache", "Claude Cache"),
-    (get_env_path("APPDATA", r"C:\ProgramData") / "Claude" / "Code Cache", "Claude Code Cache"),
-    (get_env_path("APPDATA", r"C:\ProgramData") / "obsidian" / "Cache", "Obsidian Cache"),
-    (get_env_path("APPDATA", r"C:\ProgramData") / "obsidian" / "Code Cache", "Obsidian Code Cache"),
-    (get_env_path("APPDATA", r"C:\ProgramData") / "CELSYS" / "promenade" / "dbcache", "CELSYS dbcache"),
-    (get_env_path("APPDATA", r"C:\ProgramData") / "EpicGamesLauncher" / "Saved" / "webcache_4430", "Epic webcache"),
-    (get_env_path("APPDATA", r"C:\ProgramData") / "AI Chatter" / "Cache", "AIChatter Cache"),
-    (get_env_path("APPDATA", r"C:\ProgramData") / "Programs" / "DockerDesktop" / "tmp-delete", "Docker tmp-delete"),
+    (_APPDATA / "Code" / "CachedExtensionVSIXs", "VS Code VSIX Cache"),
+    (_APPDATA / "Code" / "Crashpad", "VS Code Crashpad"),
+    (_APPDATA / "Code" / "CachedData", "VS Code CachedData"),
+    (_APPDATA / "Code" / "Cache", "VS Code Cache"),
+    (_APPDATA / "Antigravity" / "CachedExtensionVSIXs", "Antigravity VSIX Cache"),
+    (_APPDATA / "Antigravity" / "Cache", "Antigravity Cache"),
+    (_APPDATA / "Antigravity" / "CachedData", "Antigravity CachedData"),
+    (_APPDATA / "Claude" / "Cache", "Claude Cache"),
+    (_APPDATA / "Claude" / "Code Cache", "Claude Code Cache"),
+    (_APPDATA / "obsidian" / "Cache", "Obsidian Cache"),
+    (_APPDATA / "obsidian" / "Code Cache", "Obsidian Code Cache"),
+    (_APPDATA / "CELSYS" / "promenade" / "dbcache", "CELSYS dbcache"),
+    (_APPDATA / "EpicGamesLauncher" / "Saved" / "webcache_4430", "Epic webcache"),
+    (_APPDATA / "AI Chatter" / "Cache", "AIChatter Cache"),
+    (_APPDATA / "Programs" / "DockerDesktop" / "tmp-delete", "Docker tmp-delete"),
     # browsers (LocalAppData)
-    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "Opera Software" / "Opera Stable" / "Default" / "Cache", "Opera Cache (C:)"),
-    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "Opera Software" / "Opera Stable" / "Default" / "Code Cache", "Opera Code Cache (C:)"),
-    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "Opera Software" / "Opera Stable" / "Default" / "GrShaderCache", "Opera Shader Cache (C:)"),
-    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "Opera Software" / "Opera Stable" / "Default" / "System Cache", "Opera System Cache (C:)"),
-    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "Opera Software" / "Opera Stable" / "Default" / "Crash Reports", "Opera Crash Reports (C:)"),
-    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "Google" / "Chrome" / "User Data" / "Default" / "Cache", "Chrome Cache (C:)"),
-    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "Google" / "Chrome" / "User Data" / "Default" / "GrShaderCache", "Chrome Shader Cache (C:)"),
-    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "Microsoft" / "Edge" / "User Data" / "Default" / "Cache", "Edge Cache (C:)"),
-    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "Razer" / "RazerAppEngine" / "Cache", "Razer Cache"),
-    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "Razer" / "RazerAppEngine" / "Code Cache", "Razer Code Cache"),
-    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "Razer" / "RazerAppEngine" / "Service Worker" / "CacheStorage", "Razer SW CacheStorage"),
-    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "electron" / "Cache", "Electron Cache"),
-    (get_env_path("APPDATA", r"C:\ProgramData") / "Telegram Desktop" / "tdata" / "user_data" / "cache", "Telegram Cache (C:)"),
-    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "ollama app.exe" / "EBWebView" / "Default" / "Cache", "Ollama WebView Cache"),
-    (get_env_path("APPDATA", r"C:\ProgramData") / "MaxonApp" / "UserData" / "EBWebView" / "Default" / "Cache", "Maxon WebView Cache"),
-    (get_env_path("APPDATA", r"C:\ProgramData") / "Photoshop1-25-WIN" / "EBWebView" / "Default" / "Cache", "Photoshop WebView Cache"),
+    (_LOCALAPPDATA / "Opera Software" / "Opera Stable" / "Default" / "Cache", "Opera Cache (C:)"),
+    (_LOCALAPPDATA / "Opera Software" / "Opera Stable" / "Default" / "Code Cache", "Opera Code Cache (C:)"),
+    (_LOCALAPPDATA / "Opera Software" / "Opera Stable" / "Default" / "GrShaderCache", "Opera Shader Cache (C:)"),
+    (_LOCALAPPDATA / "Opera Software" / "Opera Stable" / "Default" / "System Cache", "Opera System Cache (C:)"),
+    (_LOCALAPPDATA / "Opera Software" / "Opera Stable" / "Default" / "Crash Reports", "Opera Crash Reports (C:)"),
+    (_LOCALAPPDATA / "Google" / "Chrome" / "User Data" / "Default" / "Cache", "Chrome Cache (C:)"),
+    (_LOCALAPPDATA / "Google" / "Chrome" / "User Data" / "Default" / "GrShaderCache", "Chrome Shader Cache (C:)"),
+    (_LOCALAPPDATA / "Microsoft" / "Edge" / "User Data" / "Default" / "Cache", "Edge Cache (C:)"),
+    (_LOCALAPPDATA / "Razer" / "RazerAppEngine" / "Cache", "Razer Cache"),
+    (_LOCALAPPDATA / "Razer" / "RazerAppEngine" / "Code Cache", "Razer Code Cache"),
+    (_LOCALAPPDATA / "Razer" / "RazerAppEngine" / "Service Worker" / "CacheStorage", "Razer SW CacheStorage"),
+    (_LOCALAPPDATA / "electron" / "Cache", "Electron Cache"),
+    (_APPDATA / "Telegram Desktop" / "tdata" / "user_data" / "cache", "Telegram Cache (C:)"),
+    (_LOCALAPPDATA / "ollama app.exe" / "EBWebView" / "Default" / "Cache", "Ollama WebView Cache"),
+    (_APPDATA / "MaxonApp" / "UserData" / "EBWebView" / "Default" / "Cache", "Maxon WebView Cache"),
+    (_APPDATA / "Photoshop1-25-WIN" / "EBWebView" / "Default" / "Cache", "Photoshop WebView Cache"),
     # Brave browser (LocalAppData)
-    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "BraveSoftware" / "Brave-Browser" / "User Data" / "Default" / "Cache", "Brave Cache"),
-    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "BraveSoftware" / "Brave-Browser" / "User Data" / "Default" / "Code Cache", "Brave Code Cache"),
-    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "BraveSoftware" / "Brave-Browser" / "User Data" / "Default" / "GPUCache", "Brave GPU Cache"),
+    (_LOCALAPPDATA / "BraveSoftware" / "Brave-Browser" / "User Data" / "Default" / "Cache", "Brave Cache"),
+    (_LOCALAPPDATA / "BraveSoftware" / "Brave-Browser" / "User Data" / "Default" / "Code Cache", "Brave Code Cache"),
+    (_LOCALAPPDATA / "BraveSoftware" / "Brave-Browser" / "User Data" / "Default" / "GPUCache", "Brave GPU Cache"),
     # Code Cache for Chrome/Edge (Cache already covered)
-    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "Google" / "Chrome" / "User Data" / "Default" / "Code Cache", "Chrome Code Cache"),
-    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "Microsoft" / "Edge" / "User Data" / "Default" / "Code Cache", "Edge Code Cache"),
+    (_LOCALAPPDATA / "Google" / "Chrome" / "User Data" / "Default" / "Code Cache", "Chrome Code Cache"),
+    (_LOCALAPPDATA / "Microsoft" / "Edge" / "User Data" / "Default" / "Code Cache", "Edge Code Cache"),
     # misc safe caches / logs
-    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "calibre-cache", "Calibre Cache"),
-    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "fontconfig", "fontconfig Cache"),
-    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "qBittorrent" / "logs", "qBittorrent Logs"),
-    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "claude-cli-nodejs" / "Cache", "Claude CLI Cache"),
+    (_LOCALAPPDATA / "calibre-cache", "Calibre Cache"),
+    (_LOCALAPPDATA / "fontconfig", "fontconfig Cache"),
+    (_LOCALAPPDATA / "qBittorrent" / "logs", "qBittorrent Logs"),
+    (_LOCALAPPDATA / "claude-cli-nodejs" / "Cache", "Claude CLI Cache"),
     # New findings (v2.4.8)
-    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "Mega Limited" / "MEGAsync" / "logs", "MEGAsync Logs (Local)"),
-    (get_env_path("APPDATA", r"C:\ProgramData") / "Devin" / "Cache", "Devin Cache"),
-    (get_env_path("APPDATA", r"C:\ProgramData") / "Devin" / "CachedData", "Devin CachedData"),
-    (get_env_path("APPDATA", r"C:\ProgramData") / "FontBase" / "Cache", "FontBase Cache"),
-    (get_env_path("APPDATA", r"C:\ProgramData") / "Bridge" / "Cache", "Adobe Bridge Cache"),
-    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "AIChatter" / "AI Chatter" / "cache", "AIChatter Cache"),
-    (get_env_path("APPDATA", r"C:\ProgramData") / "Autokroma" / "Influx" / "Cache", "Autokroma Influx Cache"),
-    (get_env_path("APPDATA", r"C:\ProgramData") / "Adobe" / "Adobe Substance 3D Sampler" / "thumbnailCache", "Substance 3D Thumbnail Cache"),
-    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "BlueStacks X" / "cache", "BlueStacks X Cache"),
-    (get_env_path("APPDATA", r"C:\ProgramData") / "@neuralnomads" / "codenomad-electron-app" / "session-data-v2" / "Cache", "CodeNomad Cache"),
-    (get_env_path("APPDATA", r"C:\ProgramData") / "MAXON" / "_assetcache", "Maxon Asset Cache"),
-    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "Mailbird" / "Misc" / "component_crx_cache", "Mailbird CRX Cache"),
-    (get_env_path("APPDATA", r"C:\ProgramData") / "Opera Software" / "Opera Stable" / "component_crx_cache", "Opera CRX Cache"),
-    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "BraveSoftware" / "Brave-Browser" / "User Data" / "component_crx_cache", "Brave CRX Cache"),
-    (get_env_path("APPDATA", r"C:\ProgramData") / "discord" / "component_crx_cache", "Discord CRX Cache"),
+    (_LOCALAPPDATA / "Mega Limited" / "MEGAsync" / "logs", "MEGAsync Logs (Local)"),
+    (_APPDATA / "Devin" / "Cache", "Devin Cache"),
+    (_APPDATA / "Devin" / "CachedData", "Devin CachedData"),
+    (_APPDATA / "FontBase" / "Cache", "FontBase Cache"),
+    (_APPDATA / "Bridge" / "Cache", "Adobe Bridge Cache"),
+    (_LOCALAPPDATA / "AIChatter" / "AI Chatter" / "cache", "AIChatter Cache"),
+    (_APPDATA / "Autokroma" / "Influx" / "Cache", "Autokroma Influx Cache"),
+    (_APPDATA / "Adobe" / "Adobe Substance 3D Sampler" / "thumbnailCache", "Substance 3D Thumbnail Cache"),
+    (_LOCALAPPDATA / "BlueStacks X" / "cache", "BlueStacks X Cache"),
+    (_APPDATA / "@neuralnomads" / "codenomad-electron-app" / "session-data-v2" / "Cache", "CodeNomad Cache"),
+    (_APPDATA / "MAXON" / "_assetcache", "Maxon Asset Cache"),
+    (_LOCALAPPDATA / "Mailbird" / "Misc" / "component_crx_cache", "Mailbird CRX Cache"),
+    (_APPDATA / "Opera Software" / "Opera Stable" / "component_crx_cache", "Opera CRX Cache"),
+    (_LOCALAPPDATA / "BraveSoftware" / "Brave-Browser" / "User Data" / "component_crx_cache", "Brave CRX Cache"),
+    (_APPDATA / "discord" / "component_crx_cache", "Discord CRX Cache"),
     # New findings (v2.4.9)
-    (get_env_path("APPDATA", r"C:\ProgramData") / "Devin" / "GPUCache", "Devin GPUCache"),
-    (get_env_path("APPDATA", r"C:\ProgramData") / "Devin" / "logs", "Devin Logs"),
-    (get_env_path("APPDATA", r"C:\ProgramData") / "Devin" / "cli" / "logs", "Devin CLI Logs"),
-    (get_env_path("APPDATA", r"C:\ProgramData") / "Claude" / "GPUCache", "Claude GPUCache"),
-    (get_env_path("APPDATA", r"C:\ProgramData") / "Antigravity" / "GPUCache", "Antigravity GPUCache"),
-    (get_env_path("APPDATA", r"C:\ProgramData") / "Antigravity" / "logs", "Antigravity Logs"),
-    (get_env_path("APPDATA", r"C:\ProgramData") / "@neuralnomads" / "codenomad-electron-app" / "session-data-v2" / "Code Cache", "CodeNomad Code Cache"),
-    (get_env_path("APPDATA", r"C:\ProgramData") / "@neuralnomads" / "codenomad-electron-app" / "session-data-v2" / "GPUCache", "CodeNomad GPUCache"),
-    (get_env_path("APPDATA", r"C:\ProgramData") / "ollama app.exe" / "EBWebView" / "Default" / "GPUCache", "Ollama GPUCache"),
-    (get_env_path("APPDATA", r"C:\ProgramData") / "LM Studio" / "GPUCache", "LM Studio GPUCache"),
-    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "Adobe" / "Adobe Substance 3D Painter" / "cache", "Substance 3D Painter Cache"),
-    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "Adobe" / "Adobe Substance 3D Sampler" / "cache", "Substance 3D Sampler Cache"),
-    (get_env_path("APPDATA", r"C:\ProgramData") / "CELSYS" / "CLIPStudioPaint" / "1.5.0" / "CacheData", "CLIP Studio Paint Cache"),
-    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "Reallusion" / "ActorCore AccuRIG" / "Cache", "AccuRIG Cache"),
-    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "Reallusion" / "ActorCore AccuRIG" / "Code Cache", "AccuRIG Code Cache"),
-    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "Reallusion" / "Character Creator" / "5.0" / "cache", "Character Creator Cache"),
-    (get_env_path("APPDATA", r"C:\ProgramData") / "LosslessCut" / "Cache", "LosslessCut Cache"),
-    (get_env_path("APPDATA", r"C:\ProgramData") / "LosslessCut" / "GPUCache", "LosslessCut GPUCache"),
-    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "Topaz Labs LLC" / "Topaz Video" / "cache", "Topaz Video Cache"),
-    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "Topaz Labs LLC" / "Topaz Video AI" / "cache", "Topaz Video AI Cache"),
-    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "UnrealEngine" / "5.6" / "DerivedDataCache", "Unreal Engine 5.6 DDCache"),
-    (get_env_path("APPDATA", r"C:\ProgramData") / "omniroute-desktop" / "Cache", "Omniroute Cache"),
-    (get_env_path("APPDATA", r"C:\ProgramData") / "omniroute-desktop" / "Code Cache", "Omniroute Code Cache"),
-    (get_env_path("APPDATA", r"C:\ProgramData") / "omniroute-desktop" / "GPUCache", "Omniroute GPUCache"),
-    (get_env_path("APPDATA", r"C:\ProgramData") / "omniroute-desktop" / "Service Worker" / "CacheStorage", "Omniroute SW CacheStorage"),
-    (get_env_path("APPDATA", r"C:\ProgramData") / "stem-studio" / "Cache", "Stem Studio Cache"),
-    (get_env_path("APPDATA", r"C:\ProgramData") / "stem-studio" / "GPUCache", "Stem Studio GPUCache"),
-    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "QuiteRss" / "QuiteRss" / "cache", "QuiteRss Cache"),
-    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "com.dropdead.app" / "EBWebView" / "Default" / "Cache", "Dropdead WebView Cache"),
-    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "DeskChat" / "DeskChat" / "cache", "DeskChat Cache"),
-    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "DeskChat Dump" / "cache", "DeskChat Dump Cache"),
-    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "HD-Player" / "cache", "HD-Player Cache"),
-    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "JangaFX" / "liquigen" / "gl-cache", "Liquigen GL Cache"),
-    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "Krisp" / "Logs", "Krisp Logs"),
-    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "Mailbird" / "Misc" / "Default" / "Cache", "Mailbird Cache"),
-    (get_env_path("APPDATA", r"C:\ProgramData") / "SiYuan-Electron" / "GPUCache", "SiYuan GPUCache"),
-    (get_env_path("APPDATA", r"C:\ProgramData") / "BetterDiscord Installer" / "Cache", "BetterDiscord Cache"),
-    (get_env_path("APPDATA", r"C:\ProgramData") / "BorisFX" / "BorisFX Direct" / "Cache", "BorisFX Direct Cache"),
+    (_APPDATA / "Devin" / "GPUCache", "Devin GPUCache"),
+    (_APPDATA / "Devin" / "logs", "Devin Logs"),
+    (_APPDATA / "Devin" / "cli" / "logs", "Devin CLI Logs"),
+    (_APPDATA / "Claude" / "GPUCache", "Claude GPUCache"),
+    (_APPDATA / "Antigravity" / "GPUCache", "Antigravity GPUCache"),
+    (_APPDATA / "Antigravity" / "logs", "Antigravity Logs"),
+    (_APPDATA / "@neuralnomads" / "codenomad-electron-app" / "session-data-v2" / "Code Cache", "CodeNomad Code Cache"),
+    (_APPDATA / "@neuralnomads" / "codenomad-electron-app" / "session-data-v2" / "GPUCache", "CodeNomad GPUCache"),
+    (_APPDATA / "ollama app.exe" / "EBWebView" / "Default" / "GPUCache", "Ollama GPUCache"),
+    (_APPDATA / "LM Studio" / "GPUCache", "LM Studio GPUCache"),
+    (_LOCALAPPDATA / "Adobe" / "Adobe Substance 3D Painter" / "cache", "Substance 3D Painter Cache"),
+    (_LOCALAPPDATA / "Adobe" / "Adobe Substance 3D Sampler" / "cache", "Substance 3D Sampler Cache"),
+    (_APPDATA / "CELSYS" / "CLIPStudioPaint" / "1.5.0" / "CacheData", "CLIP Studio Paint Cache"),
+    (_LOCALAPPDATA / "Reallusion" / "ActorCore AccuRIG" / "Cache", "AccuRIG Cache"),
+    (_LOCALAPPDATA / "Reallusion" / "ActorCore AccuRIG" / "Code Cache", "AccuRIG Code Cache"),
+    (_LOCALAPPDATA / "Reallusion" / "Character Creator" / "5.0" / "cache", "Character Creator Cache"),
+    (_APPDATA / "LosslessCut" / "Cache", "LosslessCut Cache"),
+    (_APPDATA / "LosslessCut" / "GPUCache", "LosslessCut GPUCache"),
+    (_LOCALAPPDATA / "Topaz Labs LLC" / "Topaz Video" / "cache", "Topaz Video Cache"),
+    (_LOCALAPPDATA / "Topaz Labs LLC" / "Topaz Video AI" / "cache", "Topaz Video AI Cache"),
+    (_LOCALAPPDATA / "UnrealEngine" / "5.6" / "DerivedDataCache", "Unreal Engine 5.6 DDCache"),
+    (_APPDATA / "omniroute-desktop" / "Cache", "Omniroute Cache"),
+    (_APPDATA / "omniroute-desktop" / "Code Cache", "Omniroute Code Cache"),
+    (_APPDATA / "omniroute-desktop" / "GPUCache", "Omniroute GPUCache"),
+    (_APPDATA / "omniroute-desktop" / "Service Worker" / "CacheStorage", "Omniroute SW CacheStorage"),
+    (_APPDATA / "stem-studio" / "Cache", "Stem Studio Cache"),
+    (_APPDATA / "stem-studio" / "GPUCache", "Stem Studio GPUCache"),
+    (_LOCALAPPDATA / "QuiteRss" / "QuiteRss" / "cache", "QuiteRss Cache"),
+    (_LOCALAPPDATA / "com.dropdead.app" / "EBWebView" / "Default" / "Cache", "Dropdead WebView Cache"),
+    (_LOCALAPPDATA / "DeskChat" / "DeskChat" / "cache", "DeskChat Cache"),
+    (_LOCALAPPDATA / "DeskChat Dump" / "cache", "DeskChat Dump Cache"),
+    (_LOCALAPPDATA / "HD-Player" / "cache", "HD-Player Cache"),
+    (_LOCALAPPDATA / "JangaFX" / "liquigen" / "gl-cache", "Liquigen GL Cache"),
+    (_LOCALAPPDATA / "Krisp" / "Logs", "Krisp Logs"),
+    (_LOCALAPPDATA / "Mailbird" / "Misc" / "Default" / "Cache", "Mailbird Cache"),
+    (_APPDATA / "SiYuan-Electron" / "GPUCache", "SiYuan GPUCache"),
+    (_APPDATA / "BetterDiscord Installer" / "Cache", "BetterDiscord Cache"),
+    (_APPDATA / "BorisFX" / "BorisFX Direct" / "Cache", "BorisFX Direct Cache"),
     # New findings (v2.4.10)
-    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "Google" / "DriveFS" / "Logs", "DriveFS Logs (Local)"),
-    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "Razer" / "RazerAppEngine" / "User Data" / "Default" / "Cache", "Razer Engine Cache"),
-    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "Razer" / "RazerAppEngine" / "User Data" / "Default" / "Code Cache", "Razer Engine Code Cache"),
-    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "Razer" / "RazerAppEngine" / "User Data" / "Default" / "GPUCache", "Razer Engine GPUCache"),
-    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "EpicGamesLauncher" / "Saved" / "webcache_4430", "Epic webcache (Local)"),
-    (get_env_path("APPDATA", r"C:\ProgramData") / "Code" / "WebStorage" / "2" / "CacheStorage", "VS Code WebStorage Cache"),
-    (get_env_path("APPDATA", r"C:\ProgramData") / "Code" / "WebStorage" / "3" / "CacheStorage", "VS Code WebStorage Cache (2)"),
-    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "com.verifiedskill.desktop" / "EBWebView" / "component_crx_cache", "VerifiedSkill CRX Cache"),
-    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "MaxonApp" / "UserData" / "EBWebView" / "Default" / "Cache", "MaxonApp WebView Cache"),
-    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "MaxonApp" / "UserData" / "EBWebView" / "Default" / "Code Cache", "MaxonApp WebView Code Cache"),
-    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "MaxonApp" / "UserData" / "EBWebView" / "Default" / "GrShaderCache", "MaxonApp WebView Shader Cache"),
-    (get_env_path("APPDATA", r"C:\ProgramData") / "Adobe" / "Adobe Photoshop 2024" / "Logs", "Photoshop 2024 Logs"),
-    (get_env_path("APPDATA", r"C:\ProgramData") / "obsidian" / "GPUCache", "Obsidian GPUCache"),
+    (_LOCALAPPDATA / "Google" / "DriveFS" / "Logs", "DriveFS Logs (Local)"),
+    (_LOCALAPPDATA / "Razer" / "RazerAppEngine" / "User Data" / "Default" / "Cache", "Razer Engine Cache"),
+    (_LOCALAPPDATA / "Razer" / "RazerAppEngine" / "User Data" / "Default" / "Code Cache", "Razer Engine Code Cache"),
+    (_LOCALAPPDATA / "Razer" / "RazerAppEngine" / "User Data" / "Default" / "GPUCache", "Razer Engine GPUCache"),
+    (_LOCALAPPDATA / "EpicGamesLauncher" / "Saved" / "webcache_4430", "Epic webcache (Local)"),
+    (_APPDATA / "Code" / "WebStorage" / "2" / "CacheStorage", "VS Code WebStorage Cache"),
+    (_APPDATA / "Code" / "WebStorage" / "3" / "CacheStorage", "VS Code WebStorage Cache (2)"),
+    (_LOCALAPPDATA / "com.verifiedskill.desktop" / "EBWebView" / "component_crx_cache", "VerifiedSkill CRX Cache"),
+    (_LOCALAPPDATA / "MaxonApp" / "UserData" / "EBWebView" / "Default" / "Cache", "MaxonApp WebView Cache"),
+    (_LOCALAPPDATA / "MaxonApp" / "UserData" / "EBWebView" / "Default" / "Code Cache", "MaxonApp WebView Code Cache"),
+    (_LOCALAPPDATA / "MaxonApp" / "UserData" / "EBWebView" / "Default" / "GrShaderCache", "MaxonApp WebView Shader Cache"),
+    (_APPDATA / "Adobe" / "Adobe Photoshop 2024" / "Logs", "Photoshop 2024 Logs"),
+    (_APPDATA / "obsidian" / "GPUCache", "Obsidian GPUCache"),
     # New findings (v2.4.14)
-    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "Packages" / "Microsoft.Windows.Search_cw5n1h2txyewy" / "LocalState" / "DeviceSearchCache", "Windows Search DeviceSearchCache"),
-    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "Packages" / "Microsoft.Windows.Search_cw5n1h2txyewy" / "LocalState" / "AppIconCache", "Windows Search AppIconCache"),
-    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "iTop Easy Desktop" / "Thumb", "iTop Easy Desktop Thumbs"),
-    (get_env_path("APPDATA", r"C:\ProgramData") / "Freebuff" / "Cache", "Freebuff Cache"),
-    (get_env_path("LOCALAPPDATA", r"C:\Temp") / "Photoshop1-25-WIN" / "EBWebView" / "Default" / "Cache", "Photoshop WebView Cache (Local)"),
-    (get_env_path("APPDATA", r"C:\ProgramData") / "Bridge" / "Code Cache", "Adobe Bridge Code Cache"),
-    (get_env_path("APPDATA", r"C:\ProgramData") / "Bridge" / "GPUCache", "Adobe Bridge GPUCache"),
-    (get_env_path("APPDATA", r"C:\ProgramData") / "ollama app.exe" / "EBWebView" / "GrShaderCache", "Ollama Shader Cache"),
-    (get_env_path("APPDATA", r"C:\ProgramData") / "AIChatter" / "profiles" / "edge" / "chatgpt" / "Default" / "Cache", "AIChatter Edge Profile Cache"),
-    (get_env_path("APPDATA", r"C:\ProgramData") / "Telegram Desktop" / "tdata" / "user_data" / "media_cache", "Telegram Media Cache (C:)"),
-    (get_env_path("APPDATA", r"C:\ProgramData") / "Opera Software" / "Opera Stable" / "Service Worker" / "CacheStorage", "Opera SW CacheStorage"),
-    (get_env_path("APPDATA", r"C:\ProgramData") / "Opera Software" / "Opera Stable" / "Service Worker" / "ScriptCache", "Opera SW ScriptCache"),
+    (_LOCALAPPDATA / "Packages" / "Microsoft.Windows.Search_cw5n1h2txyewy" / "LocalState" / "DeviceSearchCache", "Windows Search DeviceSearchCache"),
+    (_LOCALAPPDATA / "Packages" / "Microsoft.Windows.Search_cw5n1h2txyewy" / "LocalState" / "AppIconCache", "Windows Search AppIconCache"),
+    (_LOCALAPPDATA / "iTop Easy Desktop" / "Thumb", "iTop Easy Desktop Thumbs"),
+    (_APPDATA / "Freebuff" / "Cache", "Freebuff Cache"),
+    (_LOCALAPPDATA / "Photoshop1-25-WIN" / "EBWebView" / "Default" / "Cache", "Photoshop WebView Cache (Local)"),
+    (_APPDATA / "Bridge" / "Code Cache", "Adobe Bridge Code Cache"),
+    (_APPDATA / "Bridge" / "GPUCache", "Adobe Bridge GPUCache"),
+    (_APPDATA / "ollama app.exe" / "EBWebView" / "GrShaderCache", "Ollama Shader Cache"),
+    (_APPDATA / "AIChatter" / "profiles" / "edge" / "chatgpt" / "Default" / "Cache", "AIChatter Edge Profile Cache"),
+    (_APPDATA / "Telegram Desktop" / "tdata" / "user_data" / "media_cache", "Telegram Media Cache (C:)"),
+    (_APPDATA / "Opera Software" / "Opera Stable" / "Service Worker" / "CacheStorage", "Opera SW CacheStorage"),
+    (_APPDATA / "Opera Software" / "Opera Stable" / "Service Worker" / "ScriptCache", "Opera SW ScriptCache"),
 ])
 
 # Process owners for app-sensitive targets (P1-9): if the owning app is running
@@ -797,7 +927,13 @@ _TARGET_APP_GROUPS: dict[str, str | None] = {
     "Substance 3D Sampler Cache": "substance",
 }
 
-USER_APPDATA_TARGETS = [(p, d, _TARGET_APP_GROUPS.get(d)) for p, d, *_ in USER_APPDATA_TARGETS]
+# T-147: entries whose base env root failed provenance validation are dropped --
+# a poisoned APPDATA/LOCALAPPDATA can never turn a reviewed cache suffix into a
+# live destructive target.
+USER_APPDATA_TARGETS = [
+    (p, d, _TARGET_APP_GROUPS.get(d)) for p, d, *_ in USER_APPDATA_TARGETS
+    if p is not None and not _is_under(_INVALID_LOCAL, p) and not _is_under(_INVALID_ROAM, p)
+]
 
 def get_running_processes() -> set[str] | None:
     """Query running process image names.
@@ -2381,7 +2517,7 @@ class SystemCleaner(CleanerEngine):
 
         # System Temp
 
-        if self.targets.get("System Temp", True) and SYSTEM_TEMP.exists():
+        if self.targets.get("System Temp", True) and SYSTEM_TEMP is not None and SYSTEM_TEMP.exists():
 
             self._set_guard(SYSTEM_TEMP)
 
@@ -2394,7 +2530,7 @@ class SystemCleaner(CleanerEngine):
 
         # User Temp
 
-        if self.targets.get("User Temp", True) and USER_TEMP.exists():
+        if self.targets.get("User Temp", True) and USER_TEMP is not None and USER_TEMP.exists():
 
             self._set_guard(USER_TEMP)
 
@@ -2407,7 +2543,7 @@ class SystemCleaner(CleanerEngine):
 
         # User CrashDumps
 
-        if self.targets.get("App CrashDumps", True) and USER_CRASH.exists():
+        if self.targets.get("App CrashDumps", True) and USER_CRASH is not None and USER_CRASH.exists():
 
             self._set_guard(USER_CRASH)
 
@@ -2420,7 +2556,7 @@ class SystemCleaner(CleanerEngine):
 
         # Explorer Thumbnails
 
-        if self.targets.get("Explorer Thumbnails", True) and USER_EXPLORER.exists():
+        if self.targets.get("Explorer Thumbnails", True) and USER_EXPLORER is not None and USER_EXPLORER.exists():
 
             guard = self._set_guard(USER_EXPLORER)
 
@@ -2676,25 +2812,29 @@ class SystemCleaner(CleanerEngine):
         # primitives validate against it, not a stale AppData target root.
         guard = self._set_guard(Path("C:\\"))
 
-        loc = get_env_path("LOCALAPPDATA", r"C:\Temp")
+        # T-147: poisoned/absent env roots are disabled -- the sweep uses an
+        # impossible relative placeholder so every glob below is empty and the
+        # guard refuses anything, instead of sweeping an arbitrary directory.
+        loc = _LOCALAPPDATA if _LOCALAPPDATA is not None else Path("__INVALID_LOCALAPPDATA__")
 
-        prog = get_env_path("APPDATA", r"C:\ProgramData")
+        prog = _APPDATA if _APPDATA is not None else Path("__INVALID_APPDATA__")
 
         # updater leftovers in %TEMP% (-updater / @ tails)
 
-        try:
+        if USER_TEMP is not None:
+            try:
 
-            for item in USER_TEMP.iterdir():
+                for item in USER_TEMP.iterdir():
 
-                self.check_cancel()
+                    self.check_cancel()
 
-                if item.is_dir() and (item.name.endswith("-updater") or item.name.endswith("@")) and guard.is_safe(item)[0]:
+                    if item.is_dir() and (item.name.endswith("-updater") or item.name.endswith("@")) and guard.is_safe(item)[0]:
 
-                    freed += self._del_dir(item, f"Updater leftover: {item.name}")
+                        freed += self._del_dir(item, f"Updater leftover: {item.name}")
 
-        except OSError:
+            except OSError:
 
-            pass
+                pass
 
         # Viber QmlWebCache / Thumbnails (per-account subdir, under Roaming)
         # T-092: app-specific vector obeys the running-app gate.
@@ -3149,19 +3289,14 @@ def _load_and_validate() -> tuple[bool, dict, list[str]]:
     if errors:
         return False, {}, errors
 
-    if "profiles" in data:
+    # T-147/T-138: migration is done IN MEMORY first; nothing is persisted until
+    # the whole config has passed type validation AND normalization. A corrupt
+    # config stays byte-identical on disk for forensics/recovery (item 3).
+    migrated_profiles = "profiles" in data
+
+    if migrated_profiles:
 
         del data["profiles"]
-
-        try:
-
-            with open(CONFIG_FILE, "w", encoding="utf-8") as f2:
-
-                json.dump(data, f2, indent=4)
-
-        except OSError:
-
-            pass  # migration persist is best-effort
 
     if "portable_roots" not in data:
 
@@ -3214,6 +3349,16 @@ def _load_and_validate() -> tuple[bool, dict, list[str]]:
             logging.getLogger("vac_cleaner").warning(f"Unknown system target in config dropped: {name}")
 
     data["system_targets"] = {k: bool(v) for k, v in raw_st.items() if k in SYSTEM_TARGET_DEFAULTS}
+
+    # Only now -- after type validation AND normalization both passed -- is the
+    # in-memory migration persisted (best-effort; a read-only FS keeps it
+    # in-memory only). The on-disk config is never written before this point.
+    if migrated_profiles:
+        try:
+            with open(CONFIG_FILE, "w", encoding="utf-8") as f2:
+                json.dump(data, f2, indent=4)
+        except OSError:
+            pass  # migration persist is best-effort
 
     return True, data, []
 
@@ -3369,10 +3514,12 @@ class JobSpec:
     """
 
     __slots__ = ("config", "dry_run", "exclude_paths", "exclude_patterns",
-                 "ledger", "run_custom", "run_portable", "run_system", "surface", "sys_targets")
+                 "ledger", "run_custom", "run_portable", "run_system", "surface", "sys_targets",
+                 "system_roots")
 
     def __init__(self, *, dry_run, run_portable, run_system, run_custom, config,
-                 sys_targets, exclude_patterns, exclude_paths, ledger, surface="cli"):
+                 sys_targets, exclude_patterns, exclude_paths, ledger, surface="cli",
+                 system_roots=None):
         self.dry_run = bool(dry_run)
         self.run_portable = bool(run_portable)
         self.run_system = bool(run_system)
@@ -3383,6 +3530,26 @@ class JobSpec:
         self.exclude_paths = tuple(exclude_paths)
         self.ledger = ledger
         self.surface = surface
+        self.system_roots = system_roots if system_roots is not None else resolve_system_roots()
+
+
+def resolve_system_roots() -> dict:
+    """Validated destructive system-root snapshot (T-147).
+
+    Every env-derived root has already passed provenance validation at module
+    init; invalid/uncertain roots are None (target disabled), never a fallback.
+    The JobSpec carries this snapshot so all surfaces share the same validated
+    root provenance for the whole run.
+    """
+    return {
+        "SYSTEM_TEMP": SYSTEM_TEMP,
+        "USER_TEMP": USER_TEMP,
+        "USER_CRASH": USER_CRASH,
+        "USER_EXPLORER": USER_EXPLORER,
+        "LOCALAPPDATA": _LOCALAPPDATA,
+        "APPDATA": _APPDATA,
+        "appdata_target_count": len(USER_APPDATA_TARGETS),
+    }
 
 
 def resolve_job_spec(*, dry_run, run_portable, run_system, run_custom, config,

@@ -3645,6 +3645,110 @@ class TestEnvironmentPoisoning(unittest.TestCase):
             self.assertEqual(vac.get_env_path("LOCALAPPDATA", "C:/__nope__"), Path("C:/__nope__").resolve())
 
 
+class TestEnvRootProvenance(unittest.TestCase):
+    """T-147: a dynamic env value is never a trusted destructive system root."""
+
+    _BAD: ClassVar[list[str]] = ["", ".", "..", "\\", "C:\\"]
+
+    def test_poison_matrix_rejects_every_unsafe_value(self):
+        cwd = str(Path.cwd().resolve())
+        cleaner_dir = str(vac.BASE_DIR)
+        bad = self._BAD + [cwd, cleaner_dir, r"D:\Important", r"V:\Important"]
+        profile = vac._real_user_profile()
+        cases = [
+            ("LOCALAPPDATA", (profile / "AppData" / "Local"), True),
+            ("APPDATA", (profile / "AppData" / "Roaming"), True),
+            ("windir", Path(os.environ.get("SystemRoot") or r"C:\Windows").resolve(), True),
+        ]
+        for var, expected, exact in cases:
+            for val in bad:
+                with patch.dict(os.environ, {var: val}, clear=False):
+                    self.assertIsNone(vac._resolve_env_root(var, expected, exact=exact),
+                                      f"{var}={val!r} must be rejected")
+        for val in bad:
+            with patch.dict(os.environ, {"TEMP": val}, clear=False):
+                self.assertIsNone(vac._resolve_temp_root(), f"TEMP={val!r} must be rejected")
+
+    def test_valid_roots_accepted(self):
+        profile = vac._real_user_profile()
+        self.assertIsNotNone(profile)
+        local = str((profile / "AppData" / "Local").resolve())
+        with patch.dict(os.environ, {"LOCALAPPDATA": local}, clear=False):
+            self.assertEqual(vac._resolve_env_root("LOCALAPPDATA", Path(local), exact=True), Path(local))
+
+    def test_suffix_cannot_be_redirected_by_poisoned_base(self):
+        """LOCALAPPDATA=D:\\Important must disable the base, so a suffix like
+        \\NVIDIA\\GLCache can never become a live reviewed target."""
+        profile = vac._real_user_profile()
+        with patch.dict(os.environ, {"LOCALAPPDATA": r"D:\Important"}, clear=False):
+            base = vac._resolve_env_root("LOCALAPPDATA", (profile / "AppData" / "Local"), exact=True)
+            self.assertIsNone(base)
+            self.assertIsNone(vac._rooted(base, "NVIDIA", "GLCache"),
+                              "a poisoned base must not turn a cache suffix into a live target")
+
+    def test_none_roots_produce_zero_mutation(self):
+        """All roots disabled (simulated poison) => SystemCleaner deletes nothing."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "keep").mkdir()
+            (root / "keep" / "f.bin").write_bytes(b"x" * 10)
+            log = vac.Logger(log_file=None, dry_run=False)
+            with patch.object(vac, "SYSTEM_TEMP", None), \
+                 patch.object(vac, "USER_TEMP", None), \
+                 patch.object(vac, "USER_CRASH", None), \
+                 patch.object(vac, "USER_EXPLORER", None), \
+                 patch.object(vac, "USER_APPDATA_TARGETS", []), \
+                 patch.object(vac, "get_running_processes", return_value=set()), \
+                 patch.object(vac, "_LOCALAPPDATA", Path(tmp) / "none"), \
+                 patch.object(vac, "_APPDATA", Path(tmp) / "none"):
+                c = vac.SystemCleaner(False, log)
+                c.run_all()
+            self.assertEqual(log.n_deleted, 0)
+            self.assertEqual(log.n_errors, 0)
+            self.assertTrue((root / "keep" / "f.bin").exists())
+
+
+    def test_poisoned_env_import_fails_closed(self):
+        """A subprocess importing with poisoned env must not crash and must disable the roots."""
+        import subprocess as _sp
+        env = dict(os.environ)
+        env["TEMP"] = r"D:\Important"
+        env["LOCALAPPDATA"] = r"D:\Important"
+        env["APPDATA"] = r"D:\Important"
+        repo = os.path.dirname(os.path.abspath(__file__))
+        code = (
+            f"import sys; sys.path.insert(0, r'{repo}'); "
+            "import _SMART_VAC_CLEANER as vac; "
+            "assert vac.USER_TEMP is None, vac.USER_TEMP; "
+            "assert vac.USER_CRASH is None, vac.USER_CRASH; "
+            "assert vac.USER_EXPLORER is None, vac.USER_EXPLORER; "
+            "assert len(vac.USER_APPDATA_TARGETS) == 0, len(vac.USER_APPDATA_TARGETS); "
+            "print('POISON-IMPORT-OK')"
+        )
+        r = _sp.run([sys.executable, "-c", code], capture_output=True, text=True, env=env, timeout=60, check=False)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("POISON-IMPORT-OK", r.stdout)
+
+    def test_spec_carries_validated_system_roots(self):
+        """T-147: every JobSpec snapshots the provenance-validated system roots."""
+        spec = vac.resolve_job_spec(dry_run=True, run_portable=True, run_system=True, run_custom=True,
+                                    config={"portable_roots": [], "custom_rules": [],
+                                            "exclude_patterns": [], "exclude_paths": []},
+                                    surface="cli")
+        roots = spec.system_roots
+        self.assertIn("SYSTEM_TEMP", roots)
+        self.assertIn("USER_TEMP", roots)
+        # every root is either a validated absolute path or None (disabled) -- never relative/cwd
+        for key, val in roots.items():
+            if key == "appdata_target_count":
+                continue
+            if val is not None:
+                p = Path(val) if not isinstance(val, Path) else val
+                self.assertTrue(p.is_absolute(), key)
+                self.assertNotEqual(p, Path.cwd().resolve(), key)
+                self.assertFalse(vac._is_under(vac.BASE_DIR, p), key)
+
+
 class TestOracleFixture(unittest.TestCase):
 
     """T-145: hand-built oracle, not parity-with-the-planner.
@@ -3657,6 +3761,7 @@ class TestOracleFixture(unittest.TestCase):
     match the ORACLE independently -- never 'equals the planner', which would
     share any planner bug.
     """
+
 
     def _build(self, tmp):
         root = Path(tmp)
@@ -3810,6 +3915,32 @@ class TestConfigFailClosed(unittest.TestCase):
         for cfg in cases:
             code = self._run_main_delete(cfg)
             self.assertEqual(code, 3, f"config {cfg[:60]!r} must abort DELETE (exit 3)")
+
+    def test_corrupt_config_with_migration_stays_byte_identical(self):
+        """Item 3: an invalid config with a legacy 'profiles' key is NOT migrated on disk."""
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = Path(tmp) / "cleaner_config.json"
+            raw = json.dumps({"profiles": {"Default": {}}, "exclude_patterns": "oops"})
+            cfg.write_text(raw, encoding="utf-8")
+            with patch.object(vac, "CONFIG_FILE", cfg):
+                valid, _, _ = vac.load_config_strict()
+            self.assertFalse(valid)
+            self.assertEqual(cfg.read_text(encoding="utf-8"), raw,
+                             "a corrupt config must stay byte-identical for forensics")
+
+    def test_valid_config_with_migration_persists_once_validated(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = Path(tmp) / "cleaner_config.json"
+            cfg.write_text(json.dumps({"profiles": {"Default": {}},
+                                       "portable_roots": [], "custom_rules": [],
+                                       "exclude_patterns": [], "exclude_paths": [],
+                                       "system_targets": {}}), encoding="utf-8")
+            with patch.object(vac, "CONFIG_FILE", cfg):
+                valid, data, _ = vac.load_config_strict()
+            self.assertTrue(valid)
+            self.assertNotIn("profiles", data)
+            on_disk = json.loads(cfg.read_text(encoding="utf-8"))
+            self.assertNotIn("profiles", on_disk, "migration persisted only after full validation")
 
     def test_invalid_config_does_not_erase_other_fields_silently(self):
         """One malformed field invalidates the WHOLE config for DELETE (no silent drop)."""
