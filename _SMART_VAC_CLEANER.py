@@ -27,6 +27,7 @@ import argparse
 import concurrent.futures
 import copy
 import csv
+import enum
 import fnmatch
 import json
 import logging
@@ -36,6 +37,13 @@ import re
 import stat
 import subprocess
 import sys
+
+
+class ConfigState(enum.Enum):
+    MISSING = 1
+    VALID = 2
+    INVALID = 3
+
 import threading
 import time
 
@@ -60,6 +68,7 @@ import customtkinter as ctk
 
 
 VERSION = "2.6.8"
+PROCESS_AGNOSTIC = "__PROCESS_AGNOSTIC__"
 
 DEFAULT_THREADS = 12
 
@@ -317,7 +326,7 @@ APP_PROCESSES: dict[str, set[str]] = {
 
     "substance": {"adobe substance 3d sampler.exe", "adobe substance 3d painter.exe", "adobe substance 3d designer.exe"},
 
-    "general":  set(),
+    PROCESS_AGNOSTIC:  set(),
 
 }
 
@@ -391,7 +400,7 @@ APP_PROCESSES_PROVENANCE: dict[str, str] = {
     "githubcli": "verified:disk %ProgramFiles%\\GitHub CLI\\gh.exe (2026-08)",
     "mailbird": "product:exe (mailbird.exe / mailbirdportable.exe)",
     "substance": "product:exe (adobe substance 3d sampler/painter/designer.exe)",
-    "general": "intentional empty group (never blocks)",
+    PROCESS_AGNOSTIC: "verified: intentional empty group (never blocks)",
 }
 
 
@@ -931,7 +940,7 @@ _TARGET_APP_GROUPS: dict[str, str | None] = {
 # a poisoned APPDATA/LOCALAPPDATA can never turn a reviewed cache suffix into a
 # live destructive target.
 USER_APPDATA_TARGETS = [
-    (p, d, _TARGET_APP_GROUPS.get(d)) for p, d, *_ in USER_APPDATA_TARGETS
+    (p, d, _TARGET_APP_GROUPS.get(d) or (PROCESS_AGNOSTIC if d in PROCESS_AGNOSTIC_TARGETS else None)) for p, d, *_ in USER_APPDATA_TARGETS
     if p is not None and not _is_under(_INVALID_LOCAL, p) and not _is_under(_INVALID_ROAM, p)
 ]
 
@@ -983,13 +992,15 @@ def _owner_trust(app_group: str) -> str:
                   justified product:exe mapping.
       UNVERIFIED - unverified-exe (mapping kept but not confirmed) or any
                   group with NO provenance.
-    A group with no process mapping (e.g. 'general') is trivially verified:
+    A group with no process mapping (e.g. PROCESS_AGNOSTIC) is trivially verified:
     there is nothing running to guard against. An UNVERIFIED owner can never
     authorize a real deletion of an app-sensitive target (fail closed); it may
     only appear in DISCOVERED / NOT AUTHORIZED reporting.
     """
-    if not APP_PROCESSES.get(app_group):
+    if app_group == PROCESS_AGNOSTIC:
         return "verified"
+    if app_group not in APP_PROCESSES:
+        return "unverified"
     prov = APP_PROCESSES_PROVENANCE.get(app_group, "")
     if prov.startswith(("verified:", "product:")):
         return "verified"
@@ -1189,7 +1200,8 @@ class Logger:
 
             # T-110: bound the logs/ directory (retention) on every job start --
             # clean/scheduled/background runs all construct a Logger.
-            _prune_old_logs(log_file.parent)
+            if not dry_run:
+                _prune_old_logs(log_file.parent)
 
 
     def _emit_gui(self, msg: str):
@@ -1573,8 +1585,14 @@ class CleanerEngine:
         Refreshes the process table and refuses when the owning app is running
         or the snapshot is UNKNOWN. Returns True when no process gate applies.
         """
-        if not app or app == "general" or not APP_PROCESSES.get(app):
+        if app is None:
+            # P0-5: Owner is None ONLY allowed when explicitly bypassing.
+            # Normal targets should specify an owner.
+            return False
+        if app == PROCESS_AGNOSTIC:
             return True
+        if app not in APP_PROCESSES:
+            return False
         self.refresh_running()
         return not is_app_running(app, self.running)
 
@@ -1973,9 +1991,9 @@ class CleanerEngine:
                 self.log.skipped(item, "Symlink/reparse point refused")
                 return 0
             if item.is_dir():
-                return self._del_dir(item, f"{desc} / {item.name}")
+                return self._del_dir(item, f"{desc} / {item.name}", owner_group=owner_group)
             if item.is_file():
-                return self._del_file(item, f"{desc} / {item.name}")
+                return self._del_file(item, f"{desc} / {item.name}", owner_group=owner_group)
             return 0
 
         if not items:
@@ -2003,14 +2021,25 @@ class CleanerEngine:
                         if owner_group is not None and not self._owner_gate_ok(owner_group):
                             self.log.skipped(path, f"'{owner_group}' became running or unknown mid-sweep; aborting remaining mutations")
                             break
+                        
+                        submitted_in_batch = False
                         while idx < len(items) and len(pending) < _MAX_IN_FLIGHT:
+                            self.check_cancel()
+                            if owner_group is not None and not self._owner_gate_ok(owner_group):
+                                break
                             pending.add(executor.submit(_handle, items[idx]))
                             idx += 1
-                        if idx >= len(items):
+                            submitted_in_batch = True
+                            
+                        if not submitted_in_batch and owner_group is not None and not self._owner_gate_ok(owner_group):
+                            break # Broken by inner gate
+                            
+                        if idx >= len(items) and not pending:
                             break
-                        done, pending = concurrent.futures.wait(pending, return_when=concurrent.futures.FIRST_COMPLETED)
-                        for f in done:
-                            freed += f.result()
+                        elif pending:
+                            done, pending = concurrent.futures.wait(pending, return_when=concurrent.futures.FIRST_COMPLETED)
+                            for f in done:
+                                freed += f.result()
                     for f in concurrent.futures.as_completed(pending):
                         freed += f.result()
                 except CancelJobException:
@@ -2494,6 +2523,20 @@ class SystemCleaner(CleanerEngine):
         self.results: dict[str, int] = {}
 
 
+
+    import contextlib
+
+    @contextlib.contextmanager
+    def target_scope(self, root: Path):
+        r"""Scoped guard for a narrow target (P0-3). Never use C:\."""
+        old_guard = getattr(self, "guard", None)
+        self._set_guard(root)
+        try:
+            yield self.guard
+        finally:
+            if old_guard:
+                self.guard = old_guard
+
     def _set_guard(self, root: Path) -> SafetyGuard:
 
         """Switch the active guard to `root`, keeping engine exclusions (P0-3).
@@ -2523,7 +2566,7 @@ class SystemCleaner(CleanerEngine):
 
             before = freed
 
-            freed += self._del_dir_contents(SYSTEM_TEMP, "Windows System Temp")
+            freed += self._del_dir_contents(SYSTEM_TEMP, "Windows System Temp", owner_group=PROCESS_AGNOSTIC)
 
             self.results["System Temp"] = freed - before
 
@@ -2536,7 +2579,7 @@ class SystemCleaner(CleanerEngine):
 
             before = freed
 
-            freed += self._del_dir_contents(USER_TEMP, "Windows User Temp")
+            freed += self._del_dir_contents(USER_TEMP, "Windows User Temp", owner_group=PROCESS_AGNOSTIC)
 
             self.results["User Temp"] = freed - before
 
@@ -2549,7 +2592,7 @@ class SystemCleaner(CleanerEngine):
 
             before = freed
 
-            freed += self._del_dir_contents(USER_CRASH, "Windows App CrashDumps")
+            freed += self._del_dir_contents(USER_CRASH, "Windows App CrashDumps", owner_group=PROCESS_AGNOSTIC)
 
             self.results["App CrashDumps"] = freed - before
 
@@ -2648,9 +2691,9 @@ class SystemCleaner(CleanerEngine):
 
                     if self.dry_run:
                         # T-095: dry-run performs ZERO service mutation.
-                        freed += self._del_dir_contents(wu_path, "Windows Update Cache")
+                        freed += self._del_dir_contents(wu_path, "Windows Update Cache", owner_group=PROCESS_AGNOSTIC)
                     else:
-                        freed += self._clean_windows_update_cache(wu_path)
+                        freed += self._clean_windows_update_cache(wu_path) # owner_group is handled inside
 
                     self.results["Windows Update Cache"] = freed - before
 
@@ -2770,7 +2813,7 @@ class SystemCleaner(CleanerEngine):
         should_stop = orig in ("RUNNING", "START_PENDING")
         if not should_stop:
             # already EXACTLY STOPPED: deletion may proceed, nothing to restore.
-            return self._del_dir_contents(wu_path, "Windows Update Cache")
+            return self._del_dir_contents(wu_path, "Windows Update Cache", owner_group=PROCESS_AGNOSTIC)
 
         # We are about to stop a service that was running. Whatever happens
         # afterwards -- stop failure, STOP_PENDING timeout, cancellation,
@@ -2794,7 +2837,7 @@ class SystemCleaner(CleanerEngine):
                     continue
                 self.log.warning(f"wuauserv did not reach STOPPED (now {now!r}); skipping Windows Update Cache")
                 return 0
-            freed += self._del_dir_contents(wu_path, "Windows Update Cache")
+            freed += self._del_dir_contents(wu_path, "Windows Update Cache", owner_group=PROCESS_AGNOSTIC)
             return freed
         finally:
             start = subprocess.run(["net", "start", "wuauserv"], capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
@@ -2808,10 +2851,6 @@ class SystemCleaner(CleanerEngine):
 
         self.refresh_running()  # T-092: fresh snapshot, never reuse stale startup state
 
-        # T-091: install the C:\ guard as the ACTIVE guard so deletion
-        # primitives validate against it, not a stale AppData target root.
-        guard = self._set_guard(Path("C:\\"))
-
         # T-147: poisoned/absent env roots are disabled -- the sweep uses an
         # impossible relative placeholder so every glob below is empty and the
         # guard refuses anything, instead of sweeping an arbitrary directory.
@@ -2823,151 +2862,97 @@ class SystemCleaner(CleanerEngine):
 
         if USER_TEMP is not None:
             try:
-
-                for item in USER_TEMP.iterdir():
-
-                    self.check_cancel()
-
-                    if item.is_dir() and (item.name.endswith("-updater") or item.name.endswith("@")) and guard.is_safe(item)[0]:
-
-                        freed += self._del_dir(item, f"Updater leftover: {item.name}")
-
+                with self.target_scope(USER_TEMP):
+                    for item in USER_TEMP.iterdir():
+                        self.check_cancel()
+                        if item.is_dir() and (item.name.endswith("-updater") or item.name.endswith("@")) and self.guard.is_safe(item)[0]:
+                            freed += self._del_dir(item, f"Updater leftover: {item.name}", owner_group=PROCESS_AGNOSTIC)
             except OSError:
-
                 pass
 
         # Viber QmlWebCache / Thumbnails (per-account subdir, under Roaming)
         # T-092: app-specific vector obeys the running-app gate.
 
-        if not is_app_running("viber", self.running):
-
-            try:
-
+        try:
+            with self.target_scope(prog / "ViberPC"):
                 for vdir in (prog / "ViberPC").glob("*/QmlWebCache"):
-
                     self.check_cancel()
-
-                    if guard.is_safe(vdir)[0]:
-
-                        freed += self._del_dir(vdir, f"[Viber] QmlWebCache: {vdir.parent.name}")
-
+                    if self.guard.is_safe(vdir)[0]:
+                        freed += self._del_dir(vdir, f"[Viber] QmlWebCache: {vdir.parent.name}", owner_group="viber")
                 for vdir in (prog / "ViberPC").glob("*/Thumbnails"):
-
                     self.check_cancel()
-
-                    if guard.is_safe(vdir)[0]:
-
-                        freed += self._del_dir(vdir, f"[Viber] Thumbnails: {vdir.parent.name}")
-
-            except OSError:
-
-                pass
+                    if self.guard.is_safe(vdir)[0]:
+                        freed += self._del_dir(vdir, f"[Viber] Thumbnails: {vdir.parent.name}", owner_group="viber")
+        except OSError:
+            pass
 
         # leftover installer temps in %LOCALAPPDATA%
 
         try:
-
-            for f in loc.glob("*.exe.tmp"):
-
-                self.check_cancel()
-
-                if guard.is_safe(f)[0]:
-
-                    freed += self._del_file(f, f"Installer temp: {f.name}")
-
+            with self.target_scope(loc):
+                for f in loc.glob("*.exe.tmp"):
+                    self.check_cancel()
+                    if self.guard.is_safe(f)[0]:
+                        freed += self._del_file(f, f"Installer temp: {f.name}", owner_group=PROCESS_AGNOSTIC)
         except OSError:
-
             pass
 
         # Eagle logs (T-092: running-app gate)
-        if not is_app_running("eagle", self.running):
-
-            for pat, desc in [("ai-search*.log", "Eagle log: {name}"), ("log.old.log", "Eagle old log: {name}")]:
-
-                try:
-
+        for pat, desc in [("ai-search*.log", "Eagle log: {name}"), ("log.old.log", "Eagle old log: {name}")]:
+            try:
+                with self.target_scope(loc / "Eagle"):
                     for f in (loc / "Eagle").glob(pat):
-
                         self.check_cancel()
-
-                        if guard.is_safe(f)[0]:
-
-                            freed += self._del_file(f, desc.format(name=f.name))
-
-                except OSError:
-
-                    pass
+                        if self.guard.is_safe(f)[0]:
+                            freed += self._del_file(f, desc.format(name=f.name), owner_group="eagle")
+            except OSError:
+                pass
 
         # Yandex.Disk leftover logs (T-099: *.bak rollback files are never auto-deleted;
         # T-092: running-app gate)
 
-        if not is_app_running("yandexdisk", self.running):
-
-            yd = loc / "Yandex" / "Yandex.Disk.2"
-
-            try:
-
+        yd = loc / "Yandex" / "Yandex.Disk.2"
+        try:
+            with self.target_scope(loc / "Yandex"):
                 for f in yd.glob("*.log"):
-
                     self.check_cancel()
-
-                    if guard.is_safe(f)[0]:
-
-                        freed += self._del_file(f, f"Yandex.Disk log: {f.name}")
-
-            except OSError:
-
-                pass
+                    if self.guard.is_safe(f)[0]:
+                        freed += self._del_file(f, f"Yandex.Disk log: {f.name}", owner_group="yandexdisk")
+        except OSError:
+            pass
 
         # Claude desktop app.asar rollback is NOT auto-deleted (T-099)
 
         # Autodesk ODIS log
 
         odis_log = prog / "Autodesk" / "ODIS" / "DDA.log"
-
-        if odis_log.is_file() and guard.is_safe(odis_log)[0]:
-
-            freed += self._del_file(odis_log, f"Autodesk ODIS log: {odis_log.name}")
+        with self.target_scope(prog / "Autodesk"):
+            if odis_log.is_file() and self.guard.is_safe(odis_log)[0]:
+                freed += self._del_file(odis_log, f"Autodesk ODIS log: {odis_log.name}", owner_group=PROCESS_AGNOSTIC)
 
         # GitHub CLI run-log zips (cache dir only; device-id/config stay; T-092 gate)
 
-        if not is_app_running("githubcli", self.running):
-
-            try:
-
+        try:
+            with self.target_scope(loc / "GitHub CLI"):
                 for f in (loc / "GitHub CLI").glob("run-log-*.zip"):
-
                     self.check_cancel()
-
-                    if guard.is_safe(f)[0]:
-
-                        freed += self._del_file(f, f"GitHub CLI run-log: {f.name}")
-
-            except OSError:
-
-                pass
+                    if self.guard.is_safe(f)[0]:
+                        freed += self._del_file(f, f"GitHub CLI run-log: {f.name}", owner_group="githubcli")
+        except OSError:
+            pass
 
         # Firefox system profile caches (profile dirs vary per machine)
 
-        if not is_app_running("firefox", self.running):
-
-            try:
-
+        try:
+            with self.target_scope(loc / "Mozilla"):
                 for prof in (loc / "Mozilla" / "Firefox" / "Profiles").glob("*"):
-
                     self.check_cancel()
-
                     for sub in ["startupCache", "cache2", "shader-cache", "crashes", "minidumps"]:
-
                         p = prof / sub
-
-                        if p.is_dir() and guard.is_safe(p)[0]:
-
-                            freed += self._del_dir(p, f"Firefox {sub}: {prof.name}")
-
-            except OSError:
-
-                pass
+                        if p.is_dir() and self.guard.is_safe(p)[0]:
+                            freed += self._del_dir(p, f"Firefox {sub}: {prof.name}", owner_group="firefox")
+        except OSError:
+            pass
 
         return freed
 
@@ -3029,7 +3014,7 @@ class CustomCleaner(CleanerEngine):
 
                 if pattern == "*":
 
-                    freed += self._del_dir_contents(target, f"Custom: {target}")
+                    freed += self._del_dir_contents(target, f"Custom: {target}", owner_group=PROCESS_AGNOSTIC)
 
                 else:
 
@@ -3170,9 +3155,9 @@ def load_config() -> dict:
     instead of silently running with empty exclusions/policy (T-138).
     """
 
-    valid, cfg, errors = _load_and_validate()
+    state, cfg, errors = _load_and_validate()
 
-    if not valid:
+    if state == ConfigState.INVALID:
 
         for e in errors:
 
@@ -3206,7 +3191,7 @@ def _default_config() -> dict:
     }
 
 
-def load_config_strict() -> tuple[bool, dict, list[str]]:
+def load_config_strict() -> tuple[ConfigState, dict, list[str]]:
     """(valid, config, errors) for the destructive job boundary (T-138).
 
     Fresh MISSING config -> (True, defaults, []) -- creating a default is safe.
@@ -3218,11 +3203,12 @@ def load_config_strict() -> tuple[bool, dict, list[str]]:
     return _load_and_validate()
 
 
-def _load_and_validate() -> tuple[bool, dict, list[str]]:
+def _load_and_validate() -> tuple[ConfigState, dict, list[str]]:
 
     default_cfg = _default_config()
 
-    if not CONFIG_FILE.exists():
+    is_missing = not CONFIG_FILE.exists()
+    if is_missing:
 
         try:
 
@@ -3234,7 +3220,7 @@ def _load_and_validate() -> tuple[bool, dict, list[str]]:
 
             pass  # read-only FS: config stays in-memory only
 
-        return True, default_cfg, []
+        return ConfigState.MISSING, default_cfg, []
 
     try:
 
@@ -3244,7 +3230,7 @@ def _load_and_validate() -> tuple[bool, dict, list[str]]:
 
     except (OSError, ValueError) as exc:
 
-        return False, {}, [f"config file unreadable or not valid JSON: {exc}"]
+        return ConfigState.INVALID, {}, [f"config file unreadable or not valid JSON: {exc}"]
 
     # explicit per-field type validation (T-138): a wrong type in any
     # safety-critical field invalidates the WHOLE existing config for DELETE.
@@ -3252,7 +3238,7 @@ def _load_and_validate() -> tuple[bool, dict, list[str]]:
 
     if not isinstance(data, dict):
 
-        return False, {}, ["config root must be a JSON object"]
+        return ConfigState.INVALID, {}, ["config root must be a JSON object"]
 
     if not isinstance(data.get("portable_roots", []), list) or any(not isinstance(r, str) for r in data.get("portable_roots", [])):
         errors.append("portable_roots must be a list of path strings")
@@ -3262,8 +3248,30 @@ def _load_and_validate() -> tuple[bool, dict, list[str]]:
         errors.append("custom_rules must be a list of rule objects")
     else:
         for i, r in enumerate(rules):
-            if not isinstance(r, dict) or not isinstance(r.get("path"), str):
-                errors.append(f"custom_rules[{i}] must be an object with a string 'path'")
+            if not isinstance(r, dict):
+                errors.append(f"custom_rules[{i}] must be an object")
+                continue
+            path_val = r.get("path")
+            if not isinstance(path_val, str) or not path_val.strip():
+                errors.append(f"custom_rules[{i}] must have a non-empty string 'path'")
+            
+            pattern_val = r.get("pattern", "*")
+            if not isinstance(pattern_val, str) or not pattern_val.strip():
+                errors.append(f"custom_rules[{i}] must have a non-empty string 'pattern'")
+            else:
+                # Validate glob syntax
+                try:
+                    re.compile(re.escape(pattern_val).replace (r'\*', '.*').replace (r'\?', '.'))
+                except re.error:
+                    errors.append(f"custom_rules[{i}] 'pattern' is not a valid glob")
+            
+            if "enabled" in r and not isinstance(r["enabled"], bool):
+                errors.append(f"custom_rules[{i}] 'enabled' must be a boolean if present")
+                
+            allowed_keys = {"path", "pattern", "enabled"}
+            for k in r:
+                if k not in allowed_keys:
+                    errors.append(f"custom_rules[{i}] contains unknown key: {k}")
 
     ep = data.get("exclude_patterns", [])
     if not isinstance(ep, list) or any(not isinstance(p, str) for p in ep):
@@ -3277,8 +3285,15 @@ def _load_and_validate() -> tuple[bool, dict, list[str]]:
     if not isinstance(st, dict) or any(not isinstance(k, str) or not isinstance(v, bool) for k, v in st.items()):
         errors.append("system_targets must be an object mapping target names to booleans")
 
-    if not isinstance(data.get("auto_clean_interval_hours", 0), (int, float)):
+    interval = data.get("auto_clean_interval_hours", 0)
+    if isinstance(interval, bool) or not isinstance(interval, (int, float)):
         errors.append("auto_clean_interval_hours must be a number")
+    elif interval < 0 or interval > 8760:
+        errors.append("auto_clean_interval_hours must be between 0 and 8760")
+    else:
+        import math
+        if math.isnan(interval) or math.isinf(interval):
+            errors.append("auto_clean_interval_hours must be a finite number")
 
     if not isinstance(data.get("lang", "en"), str):
         errors.append("lang must be a string")
@@ -3287,7 +3302,7 @@ def _load_and_validate() -> tuple[bool, dict, list[str]]:
         errors.append("window_geometry must be a string")
 
     if errors:
-        return False, {}, errors
+        return ConfigState.INVALID, {}, errors
 
     # T-147/T-138: migration is done IN MEMORY first; nothing is persisted until
     # the whole config has passed type validation AND normalization. A corrupt
@@ -3332,7 +3347,16 @@ def _load_and_validate() -> tuple[bool, dict, list[str]]:
 
     data["custom_rules"] = rules
 
-    data["exclude_paths"] = [str(p) for p in (normalize_path(ep) for ep in data.get("exclude_paths", [])) if p is not None]
+    norm_paths = []
+    for ep in data.get("exclude_paths", []):
+        p = normalize_path(ep)
+        if p is None:
+            errors.append(f"exclude_paths contains invalid/unresolvable path: {ep}")
+        else:
+            norm_paths.append(str(p))
+    if errors:
+        return ConfigState.INVALID, {}, errors
+    data["exclude_paths"] = norm_paths
 
     raw_st = data.get("system_targets")
 
@@ -3343,11 +3367,12 @@ def _load_and_validate() -> tuple[bool, dict, list[str]]:
         data["system_targets"] = {}
 
     for name in raw_st:
-
         if name not in SYSTEM_TARGET_DEFAULTS:
+            errors.append(f"Unknown system target in config: {name}")
 
-            logging.getLogger("vac_cleaner").warning(f"Unknown system target in config dropped: {name}")
-
+    if errors:
+        return ConfigState.INVALID, {}, errors
+        
     data["system_targets"] = {k: bool(v) for k, v in raw_st.items() if k in SYSTEM_TARGET_DEFAULTS}
 
     # Only now -- after type validation AND normalization both passed -- is the
@@ -3360,7 +3385,7 @@ def _load_and_validate() -> tuple[bool, dict, list[str]]:
         except OSError:
             pass  # migration persist is best-effort
 
-    return True, data, []
+    return ConfigState.MISSING if is_missing else ConfigState.VALID, data, []
 
 
 def parse_geometry(geom: str, default: str = "960x640", min_w: int = 800, min_h: int = 500) -> str:
@@ -3520,17 +3545,19 @@ class JobSpec:
     def __init__(self, *, dry_run, run_portable, run_system, run_custom, config,
                  sys_targets, exclude_patterns, exclude_paths, ledger, surface="cli",
                  system_roots=None):
+        import copy
+        import types
         self.dry_run = bool(dry_run)
         self.run_portable = bool(run_portable)
         self.run_system = bool(run_system)
         self.run_custom = bool(run_custom)
-        self.config = config
-        self.sys_targets = sys_targets
+        self.config = types.MappingProxyType(copy.deepcopy(config))
+        self.sys_targets = types.MappingProxyType(dict(sys_targets))
         self.exclude_patterns = tuple(exclude_patterns)
         self.exclude_paths = tuple(exclude_paths)
         self.ledger = ledger
         self.surface = surface
-        self.system_roots = system_roots if system_roots is not None else resolve_system_roots()
+        self.system_roots = types.MappingProxyType(system_roots if system_roots is not None else resolve_system_roots())
 
 
 def resolve_system_roots() -> dict:
@@ -3648,8 +3675,8 @@ def cli_status():
     and runs the shared dry-run planner. The candidate truth is identical to a
     dry-run for the same snapshot/config.
     """
-    valid, config, config_errors = load_config_strict()
-    if not valid:
+    state, config, config_errors = load_config_strict()
+    if state == ConfigState.INVALID:
         for e in config_errors:
             print(f"Warning: config invalid - {e}")
         config = _default_config()
@@ -3827,6 +3854,16 @@ class App(ctk.CTk):
     def _start_job(self):
         if self._clean_in_progress: return
         if self._close_pending: return
+        
+        state, safe_config, config_errors = load_config_strict()
+        if state == ConfigState.INVALID:
+            messagebox.showerror(
+                self.T.get("error_title", "Error"),
+                self.T.get("config_invalid", "Configuration is invalid. Cannot start cleaning.\n\n") + "\n".join(config_errors),
+                parent=self
+            )
+            return
+            
         if not messagebox.askyesno(
                 self.T["confirm_title"],
                 self.T["confirm_body"],
@@ -3846,7 +3883,7 @@ class App(ctk.CTk):
         # T-128: freeze the job spec on the Tk thread BEFORE the worker starts.
         # The worker reads ONLY this spec, never the mutable GUI state.
         spec = resolve_job_spec(dry_run=False, run_portable=True, run_system=True, run_custom=True,
-                                config=self.config, sys_targets=self.sys_targets, surface="gui")
+                                config=safe_config, sys_targets=self.sys_targets, surface="gui")
         self._worker_thread = threading.Thread(target=self._run_job, args=(spec,), daemon=True)
         self._worker_thread.start()
 
@@ -3856,6 +3893,15 @@ class App(ctk.CTk):
         # no confirm dialog is needed or shown here.
         if self._clean_in_progress: return
         if self._close_pending: return
+        
+        state, safe_config, config_errors = load_config_strict()
+        if state == ConfigState.INVALID:
+            messagebox.showerror(
+                self.T.get("error_title", "Error"),
+                self.T.get("config_invalid", "Configuration is invalid. Cannot start preview.\n\n") + "\n".join(config_errors),
+                parent=self
+            )
+            return
         self._rebuild_cat_bars()
         self._reset_dashboard()
         self._clean_in_progress = True
@@ -3870,7 +3916,7 @@ class App(ctk.CTk):
         self._job_done_event.clear()
         # T-128: freeze the job spec before the worker starts (same gui surface).
         spec = resolve_job_spec(dry_run=True, run_portable=True, run_system=True, run_custom=True,
-                                config=self.config, sys_targets=self.sys_targets, surface="gui")
+                                config=safe_config, sys_targets=self.sys_targets, surface="gui")
         self._worker_thread = threading.Thread(target=self._run_job, args=(spec,), daemon=True)
         self._worker_thread.start()
 
@@ -4115,15 +4161,19 @@ class App(ctk.CTk):
             lb.delete(sel[0])
 
     def _save_exclusions(self, win, txt, lb):
+        import copy
         pats = [ln.strip() for ln in txt.get('1.0', 'end').splitlines() if ln.strip()]
         paths = [str(Path(p)) for p in lb.get(0, 'end') if str(p).strip()]
-        self.config['exclude_patterns'] = pats
-        self.config['exclude_paths'] = paths
-        # T-141: on a persistence failure the dialog stays open and the user is
-        # told -- never a false "saved" over a silently-dropped config.
-        if not save_config(self.config):
+        candidate_config = copy.deepcopy(self.config)
+        candidate_config['exclude_patterns'] = pats
+        candidate_config['exclude_paths'] = paths
+        
+        # P1-10: GUI SETTINGS SAVE IS NOT TRANSACTIONAL
+        if not save_config(candidate_config):
             self._log("Error: could not save exclusions (config not writable)")
             return
+        
+        self.config = candidate_config
         win.destroy()
         self._log(self.T["exc_saved"])
 
@@ -4338,8 +4388,8 @@ def main():
             _hide_console()
         # T-138: an existing but malformed config must NEVER authorize a
         # destructive run with silently-empty exclusions/policy.
-        valid, config, config_errors = load_config_strict()
-        if not valid:
+        state, config, config_errors = load_config_strict()
+        if state == ConfigState.INVALID:
             if not dry_run:
                 print("Config error - refusing to run a destructive job:", "; ".join(config_errors))
                 sys.exit(3)

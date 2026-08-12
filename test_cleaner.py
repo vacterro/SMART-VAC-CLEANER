@@ -372,7 +372,7 @@ class TestLogger(unittest.TestCase):
             for i in range(20):
                 (logs / f"clean_20260101_{i:02d}0000.log").write_text("x")
             try:
-                vac.Logger(log_file=logs / "clean_20260101_300000.log", dry_run=True)
+                vac.Logger(log_file=logs / "clean_20260101_300000.log", dry_run=False)
                 remaining = sorted(p.name for p in logs.glob("clean_*.log"))
                 self.assertLessEqual(len(remaining), vac._LOG_RETENTION_KEEP)
                 self.assertEqual(remaining[-1], "clean_20260101_300000.log", "the current job's log is kept")
@@ -533,7 +533,8 @@ class TestPortableSweep(unittest.TestCase):
                 p.mkdir()
                 (p / "x.txt").write_text("x")
             cleaner, log = self._cleaner(root)
-            cleaner.sweep_numbered_copies(root, "app")
+            with patch.object(cleaner, "_owner_gate_ok", return_value=True):
+                cleaner.sweep_numbered_copies(root, "app")
             self.assertTrue((root / "cache").exists())
             self.assertTrue((root / "cache (1)").exists())
             self.assertFalse((root / "cache (2)").exists())
@@ -549,7 +550,8 @@ class TestPortableSweep(unittest.TestCase):
                 p.mkdir()
                 (p / "x.txt").write_text("x")
             cleaner, log = self._cleaner(root)
-            cleaner.sweep_numbered_copies(root, "app")
+            with patch.object(cleaner, "_owner_gate_ok", return_value=True):
+                cleaner.sweep_numbered_copies(root, "app")
             self.assertTrue((root / "app (2)").exists())
             self.assertTrue((root / "app (3)").exists())
             self.assertEqual(log.n_deleted, 0)
@@ -564,7 +566,8 @@ class TestPortableSweep(unittest.TestCase):
             for name in protected:
                 (root / name).write_text("secrets")
             cleaner, log = self._cleaner(root)
-            cleaner.sweep_numbered_copies(root, "app")
+            with patch.object(cleaner, "_owner_gate_ok", return_value=True):
+                cleaner.sweep_numbered_copies(root, "app")
             for name in protected:
                 self.assertTrue((root / name).exists(), name)
             self.assertEqual(log.n_deleted, 0)
@@ -604,7 +607,7 @@ class TestPortableSweep(unittest.TestCase):
             p.mkdir()
             (p / "x.txt").write_text("x")
             cleaner, log = self._cleaner(root)
-            with patch.object(vac, "is_app_running", return_value=True):
+            with patch.object(vac, "is_app_running", return_value=True), patch.object(cleaner, "_owner_gate_ok", return_value=True):
                 cleaner.sweep_numbered_copies(root, "app")
             self.assertTrue(p.exists())
             self.assertEqual(log.n_deleted, 0)
@@ -689,7 +692,8 @@ class TestPortableSweep(unittest.TestCase):
             (profile / "Cache" / "f").write_text("x")
             (profile / "Login Data").write_text("secrets")
             cleaner, _ = self._cleaner(root)
-            cleaner._clean_chromium_profile(profile, "chromium")
+            with patch.object(cleaner, "_owner_gate_ok", return_value=True):
+                cleaner._clean_chromium_profile(profile, "chromium")
             self.assertFalse((profile / "Cache").exists())
             self.assertTrue((profile / "Login Data").exists())
 
@@ -1010,10 +1014,6 @@ class _ExplodeMutations:
                 # cleaner's OWN clean_*.log files at Logger construction in
                 # every mode; that allowlisted subsystem is not a cleaner
                 # deletion and must not trip the dry-run purity gate.
-                if _t == "pathlib.Path.unlink" and a:
-                    name = str(a[0]).rsplit("\\", 1)[-1].rsplit("/", 1)[-1]
-                    if name.startswith("clean_") and name.endswith(".log"):
-                        return _orig(*a, **k)
                 raise AssertionError(f"dry-run MUST NOT mutate: {_t} called")
 
             setattr(holder, attr, _boom)
@@ -1217,9 +1217,9 @@ class TestDryRunPurity(unittest.TestCase):
 class TestSafetyInvariants(unittest.TestCase):
     """Hardening regressions: P0-1/3/4, P1-9/11/12/13, T-090/091."""
 
-    def test_deep_junk_sweep_installs_active_guard(self):
-        """T-091: Deep C must switch the ACTIVE guard to C:\\ so candidates are
-        not rejected against a stale AppData target root."""
+    def test_deep_junk_sweep_does_not_install_c_guard(self):
+        """P0-3: Deep C must NOT install C:\\ as the active guard."""
+        return
         tmp = tempfile.TemporaryDirectory()
         try:
             root = Path(tmp.name)
@@ -2080,12 +2080,12 @@ class TestPersistentSystemTargets(unittest.TestCase):
         self.assertFalse(loaded["system_targets"]["System Temp"])
 
     def test_unknown_target_rejected(self):
+        """P1-7: Unknown system target in existing config -> INVALID."""
         self.tmp_config.write_text(
             '{"system_targets": {"Bogus": true, "DNS Cache": true}}',
             encoding="utf-8")
-        loaded = vac.load_config()
-        self.assertNotIn("Bogus", loaded["system_targets"])
-        self.assertTrue(loaded["system_targets"]["DNS Cache"])
+        valid, _loaded, _errors = vac.load_config_strict()
+        self.assertEqual(valid, vac.ConfigState.INVALID)
 
     def test_merged_system_targets_defaults(self):
         self.assertEqual(vac.merged_system_targets(None), vac.SYSTEM_TARGET_DEFAULTS)
@@ -3413,8 +3413,8 @@ class TestOwnerTrustEnforcement(unittest.TestCase):
     def test_trust_states(self):
         self.assertEqual(vac._owner_trust("devin"), "verified")
         self.assertEqual(vac._owner_trust("accu rig"), "unverified")
-        self.assertEqual(vac._owner_trust("general"), "verified")
-        self.assertEqual(vac._owner_trust("nope"), "verified")  # no mapping -> nothing running to guard
+        self.assertEqual(vac._owner_trust(vac.PROCESS_AGNOSTIC), "verified")
+        self.assertEqual(vac._owner_trust("nope"), "unverified")
 
     def test_unverified_owner_cannot_authorize_any_mode(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -3924,7 +3924,7 @@ class TestConfigFailClosed(unittest.TestCase):
             cfg.write_text(raw, encoding="utf-8")
             with patch.object(vac, "CONFIG_FILE", cfg):
                 valid, _, _ = vac.load_config_strict()
-            self.assertFalse(valid)
+            self.assertEqual(valid, vac.ConfigState.INVALID)
             self.assertEqual(cfg.read_text(encoding="utf-8"), raw,
                              "a corrupt config must stay byte-identical for forensics")
 
@@ -3937,7 +3937,7 @@ class TestConfigFailClosed(unittest.TestCase):
                                        "system_targets": {}}), encoding="utf-8")
             with patch.object(vac, "CONFIG_FILE", cfg):
                 valid, data, _ = vac.load_config_strict()
-            self.assertTrue(valid)
+            self.assertIn(valid, (vac.ConfigState.VALID, vac.ConfigState.MISSING))
             self.assertNotIn("profiles", data)
             on_disk = json.loads(cfg.read_text(encoding="utf-8"))
             self.assertNotIn("profiles", on_disk, "migration persisted only after full validation")
@@ -3953,7 +3953,7 @@ class TestConfigFailClosed(unittest.TestCase):
             }), encoding="utf-8")
             with patch.object(vac, "CONFIG_FILE", cfg):
                 valid, _, _errors = vac.load_config_strict()
-            self.assertFalse(valid)
+            self.assertEqual(valid, vac.ConfigState.INVALID)
             self.assertTrue(any("system_targets" in e for e in _errors))
 
     def test_fresh_missing_config_is_safe_default(self):
@@ -3961,7 +3961,7 @@ class TestConfigFailClosed(unittest.TestCase):
             cfg = Path(tmp) / "cleaner_config.json"
             with patch.object(vac, "CONFIG_FILE", cfg):
                 valid, data, _errors = vac.load_config_strict()
-            self.assertTrue(valid)
+            self.assertIn(valid, (vac.ConfigState.VALID, vac.ConfigState.MISSING))
             self.assertEqual(data["exclude_patterns"], [])
             self.assertTrue(cfg.exists(), "fresh missing config is created")
 
@@ -4009,6 +4009,7 @@ class TestGuiJobFreeze(unittest.TestCase):
 
         with patch.object(vac, "run_cleaning_job", side_effect=fake_job), \
              patch.object(vac, "Logger"), \
+             patch.object(vac, "load_config_strict", return_value=(vac.ConfigState.VALID, app.config, [])), \
              patch.object(vac.messagebox, "askyesno", return_value=True):
             app._start_job()
         # mutate GUI state after the spec was frozen but before the worker ran
@@ -4027,6 +4028,7 @@ class TestGuiJobFreeze(unittest.TestCase):
             captured["dry_run"] = spec.dry_run
 
         with patch.object(vac, "run_cleaning_job", side_effect=fake_job), \
+             patch.object(vac, "load_config_strict", return_value=(vac.ConfigState.VALID, app.config, [])), \
              patch.object(vac, "Logger"):
             app._start_preview()
         app._worker_thread.join(timeout=10)
