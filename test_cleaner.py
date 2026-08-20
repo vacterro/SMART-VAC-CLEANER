@@ -274,7 +274,8 @@ class TestSafetyGuard(unittest.TestCase):
 class TestGetRunningProcesses(unittest.TestCase):
 
     @patch("_SMART_VAC_CLEANER.subprocess.run")
-    def test_parses_output(self, mock_run):
+    @patch("_SMART_VAC_CLEANER._enumerate_processes_win", return_value=None)
+    def test_parses_output(self, mock_native, mock_run):
         mock_run.return_value = MagicMock(
             stdout='"chrome.exe","1234","Console"\r\n"firefox.exe","5678","Console"\r\n',
             returncode=0)
@@ -282,7 +283,8 @@ class TestGetRunningProcesses(unittest.TestCase):
         self.assertEqual(procs, {"chrome.exe", "firefox.exe"})
 
     @patch("_SMART_VAC_CLEANER.subprocess.run")
-    def test_parses_quoted_csv_image_names(self, mock_run):
+    @patch("_SMART_VAC_CLEANER._enumerate_processes_win", return_value=None)
+    def test_parses_quoted_csv_image_names(self, mock_native, mock_run):
         """tasklist csv rows may carry quotes; csv.reader must handle them (P1-8)."""
         mock_run.return_value = MagicMock(
             stdout='"chrome.exe, x64","1234","Console"\r\n',
@@ -291,19 +293,22 @@ class TestGetRunningProcesses(unittest.TestCase):
         self.assertEqual(procs, {"chrome.exe, x64"})
 
     @patch("_SMART_VAC_CLEANER.subprocess.run")
-    def test_failure_returns_none_fail_closed(self, mock_run):
+    @patch("_SMART_VAC_CLEANER._enumerate_processes_win", return_value=None)
+    def test_failure_returns_none_fail_closed(self, mock_native, mock_run):
         """Exception => UNKNOWN (None), never an empty 'nothing runs' set (P1-8)."""
         mock_run.side_effect = OSError("fail")
         self.assertIsNone(vac.get_running_processes())
 
     @patch("_SMART_VAC_CLEANER.subprocess.run")
-    def test_nonzero_exit_returns_none(self, mock_run):
+    @patch("_SMART_VAC_CLEANER._enumerate_processes_win", return_value=None)
+    def test_nonzero_exit_returns_none(self, mock_native, mock_run):
         """Nonzero tasklist exit => UNKNOWN (None), never 'nothing runs'."""
         mock_run.return_value = MagicMock(stdout="", returncode=1)
         self.assertIsNone(vac.get_running_processes())
 
     @patch("_SMART_VAC_CLEANER.subprocess.run")
-    def test_empty_output(self, mock_run):
+    @patch("_SMART_VAC_CLEANER._enumerate_processes_win", return_value=None)
+    def test_empty_output(self, mock_native, mock_run):
         mock_run.return_value = MagicMock(stdout="", returncode=0)
         self.assertEqual(vac.get_running_processes(), set())
 
@@ -864,7 +869,7 @@ class TestCLIFunctions(unittest.TestCase):
         mock_parse.return_value = MagicMock(
             dry_run=False, delete=False,
             portable=False, system=False, custom=False, all=False,
-            cli=False, status=True, hidden=False, sys_targets="", disable_targets="",
+            cli=False, status=True, analyze_caches=False, hidden=False, sys_targets="", disable_targets="",
             exclude="", install_task=False, time="09:00",
         )
         with patch.object(vac, "cli_status") as mock_status:
@@ -1647,31 +1652,27 @@ class TestCLISemantics(unittest.TestCase):
         self.assertEqual(vac.subprocess.list2cmdline(argv), cmd)
 
     def test_clean_argv_carries_full_target_mask(self):
-        """T-129: scheduled/background argv serializes the FULL deviation from defaults.
+        """CORE-009: scheduled argv is canonical and carries NO stale target mask.
 
-        Both directions: risky targets enabled (--sys-targets) AND safe targets
-        disabled (--disable-targets) -- otherwise a GUI state that switches a
-        safe default off would be silently re-enabled by --all.
+        Scheduled/background argv is the safe default form. Actual system targets
+        are resolved from current config at each scheduled invocation, not from
+        the argv baked at install time. This prevents stale policy drift.
         """
         mask = dict(vac.SYSTEM_TARGET_DEFAULTS)
         mask["Recycle Bin"] = True
         mask["DNS Cache"] = True
         mask["System Temp"] = False
         argv = vac.clean_argv(mask)
-        self.assertIn("--sys-targets", argv)
-        join = ",".join(argv)
-        self.assertIn("Recycle Bin", join)
-        self.assertIn("DNS Cache", join)
-        self.assertIn("--disable-targets", argv)
-        self.assertIn("System Temp", argv)
+        # CORE-009: no sys-targets snapshot in canonical argv
+        self.assertNotIn("--sys-targets", argv)
+        self.assertNotIn("--disable-targets", argv)
         self.assertEqual(vac.background_clean_argv(mask), vac.clean_argv(mask))
         cmd = vac.scheduled_task_command(mask)
-        self.assertIn("--sys-targets", cmd)
-        self.assertIn("Recycle Bin", cmd)
-        self.assertIn("--disable-targets", cmd)
-        self.assertIn("System Temp", cmd)
-        # unknown names fail closed (dropped, never serialized)
-        self.assertNotIn("Bogus", " ".join(vac.clean_argv({"Bogus": True})))
+        # canonical argv has no target deviations
+        self.assertNotIn("--sys-targets", cmd)
+        self.assertNotIn("--disable-targets", cmd)
+        self.assertIn("--all", cmd)
+        self.assertIn("--delete", cmd)
 
     def test_clean_argv_defaults_no_sys_targets(self):
         """T-106: no deviations -> argv identical to the safe default form."""
@@ -1682,20 +1683,26 @@ class TestCLISemantics(unittest.TestCase):
         # a full default mask serializes nothing either
         self.assertNotIn("--disable-targets", vac.clean_argv(dict(vac.SYSTEM_TARGET_DEFAULTS)))
 
-    def test_enabled_risky_targets_helper(self):
-        """T-106: only risky opt-ins beyond the safe defaults pass through."""
+    def test_target_deviations_helper(self):
+        """T-129: _target_deviations returns full both-direction deviation."""
         st = dict(vac.SYSTEM_TARGET_DEFAULTS)
         st["Recycle Bin"] = True
         st["DNS Cache"] = True
-        out = vac.enabled_risky_targets(st)
-        self.assertIn("Recycle Bin", out)
-        self.assertIn("DNS Cache", out)
-        self.assertNotIn("System Temp", out)  # safe default, --all already carries it
-        self.assertEqual(vac.enabled_risky_targets(dict(vac.SYSTEM_TARGET_DEFAULTS)), [])
-        self.assertEqual(vac.enabled_risky_targets(None), [])
+        enables, _disables = vac._target_deviations(st)
+        self.assertIn("Recycle Bin", enables)
+        self.assertIn("DNS Cache", enables)
+        self.assertNotIn("System Temp", enables)  # safe default, --all already carries it
+        en, dis = vac._target_deviations(dict(vac.SYSTEM_TARGET_DEFAULTS))
+        self.assertEqual(en, [])
+        self.assertEqual(dis, [])
+        self.assertEqual(vac._target_deviations(None), ([], []))
 
-    def test_install_task_passes_sys_targets(self):
-        """T-129: install_task embeds the full target mask in the schtasks /tr command."""
+    def test_install_task_no_stale_targets(self):
+        """CORE-009: install_task produces canonical argv with no target mask.
+
+        Scheduled execution resolves current config at runtime; the argv never
+        carries a stale snapshot of sys_targets.
+        """
         with patch.object(vac.subprocess, "run") as mock_run:
             mock_run.return_value = MagicMock(returncode=0, stderr="")
             mask = dict(vac.SYSTEM_TARGET_DEFAULTS)
@@ -1705,11 +1712,12 @@ class TestCLISemantics(unittest.TestCase):
         self.assertTrue(ok)
         argv = mock_run.call_args.args[0]
         self.assertIn("/tr", argv)
-        tr_idx = argv.index("/tr")
-        self.assertIn("--sys-targets", argv[tr_idx + 1])
-        self.assertIn("Recycle Bin", argv[tr_idx + 1])
-        self.assertIn("--disable-targets", argv[tr_idx + 1])
-        self.assertIn("System Temp", argv[tr_idx + 1])
+        tr_cmd = argv[argv.index("/tr") + 1]
+        # CORE-009: no stale target deviations in the command
+        self.assertNotIn("--sys-targets", tr_cmd)
+        self.assertNotIn("--disable-targets", tr_cmd)
+        self.assertIn("--all", tr_cmd)
+        self.assertIn("--delete", tr_cmd)
 
     def test_install_task_defaults_safe(self):
         """T-106: no deviations -> scheduled command stays the safe --all form."""
@@ -1966,7 +1974,8 @@ class TestWindowsUpdateTransaction(unittest.TestCase):
         targets["Windows Update Cache"] = True
         c.targets = targets
         with patch.object(vac.subprocess, "run", side_effect=AssertionError("dry-run service mutation")), \
-             patch.object(vac, "get_running_processes", return_value=set()):
+             patch.object(vac, "get_running_processes", return_value=set()), \
+             patch.object(vac.Path, "exists", return_value=False):
             c.run_all()
 
 
@@ -2491,6 +2500,7 @@ class TestZeroByteAccounting(unittest.TestCase):
             f = root / "deep" / "empty.txt"
             f.parent.mkdir(parents=True)
             f.touch()
+            vac.Logger.enable_recorder()
             log = vac.Logger(log_file=None, dry_run=False)
             engine = vac.CleanerEngine(False, log,
                                        vac.SafetyGuard(root, allow_shallow_system_target=True), root)
@@ -2688,6 +2698,7 @@ class TestStatusDryRunParity(unittest.TestCase):
         """The dry-run and status must identify the SAME candidate paths."""
         tmp, _root, tgt, tgt2, tgt3, excl = self._fixture()
         try:
+            vac.Logger.enable_recorder()
             res_dry, log = self._run_system(tmp.name, tgt, tgt2, tgt3, excl, running=set())
             # candidate truth at FILE granularity comes from the planner itself
             engine = vac.CleanerEngine(True, log, vac.SafetyGuard(tgt.parent, allow_shallow_system_target=True), tgt.parent,

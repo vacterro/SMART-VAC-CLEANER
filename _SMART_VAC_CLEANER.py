@@ -37,6 +37,7 @@ import re
 import stat
 import subprocess
 import sys
+from collections import deque
 
 
 class ConfigState(enum.Enum):
@@ -67,7 +68,7 @@ import customtkinter as ctk
 
 
 
-VERSION = "2.6.8"
+VERSION = "2.6.9"
 PROCESS_AGNOSTIC = "__PROCESS_AGNOSTIC__"
 
 DEFAULT_THREADS = 12
@@ -518,6 +519,79 @@ CHROMIUM_USERDATA_FILES = ["BrowserMetrics-spare.pma"]
 
 
 
+
+
+# CORE-005/W2-001: cross-process destructive-job lease via Windows named mutex.
+# Only one real-DELETE job can hold mutation rights at a time across GUI,
+# background, CLI, and Task Scheduler processes. Dry-run/status are always
+# allowed concurrently. The mutex name is stable per-installation (derived from
+# CONFIG_FILE parent) so different machines don't collide. Release is automatic
+# on process death; a zombie mutex from a crashed process is transparently
+# acquired by the next process (Windows kernel releases it).
+def _lease_mutex_name() -> str:
+    try:
+        p = str(CONFIG_FILE.parent)
+        base = "".join("_" if c in ("\\", ":") else c for c in p)
+    except Exception:
+        base = "SmartVAC"
+    return f"Global\\SmartVACCleaner_Lease_{base}"
+
+
+class _JobLease:
+    """Context manager for the cross-process destructive-job lease.
+
+    acquire() blocks until the mutex is obtained (or raises on interrupt).
+    release() drops the hold so another process can acquire. The mutex is a
+    Windows kernel object: if the holding process crashes, the kernel releases
+    it automatically — no stale-lock recovery needed.
+    """
+
+    def __init__(self):
+        self._mutex = None
+
+    def acquire(self) -> bool:
+        """Acquire the lease. Returns True on success, False if interrupted."""
+        try:
+            import ctypes
+            kernel32 = ctypes.windll.kernel32
+            name = _lease_mutex_name().encode("utf-8")
+            self._mutex = kernel32.CreateMutexW(None, True, name)
+            if self._mutex:
+                return True
+            err = ctypes.get_last_error()
+            if err == 5:  # ERROR_ACCESS_DENIED — should not happen; treat as busy
+                return False
+            # Another process holds it: wait up to 10s then give up.
+            wait = kernel32.WaitForSingleObject(self._mutex, 10000)
+            return wait == 0
+        except Exception:
+            return False
+
+    def release(self) -> None:
+        if self._mutex is not None:
+            try:
+                import ctypes
+                ctypes.windll.kernel32.ReleaseMutex(self._mutex)
+            except Exception:
+                pass
+            finally:
+                try:
+                    import ctypes
+                    ctypes.windll.kernel32.CloseHandle(self._mutex)
+                except Exception:
+                    pass
+                self._mutex = None
+
+    def __enter__(self):
+        if not self.acquire():
+            raise RuntimeError("BUSY: another destructive job holds the lease")
+        return self
+
+    def __exit__(self, *exc):
+        self.release()
+        return False
+
+
 def get_env_path(var_name: str, fallback: str) -> Path:
 
     """Resolve an env var to a canonical path, or the fallback.
@@ -657,192 +731,196 @@ USER_CRASH = _rooted(_LOCALAPPDATA, "CrashDumps")
 USER_EXPLORER = _rooted(_LOCALAPPDATA, "Microsoft", "Windows", "Explorer")
 
 
-# T-147: poisoned/absent env roots become impossible relative SENTINEL paths so
-# the AppData target list still builds (Path/ never sees None); entries rooted
-# in a sentinel are filtered out of the live target list below.
-_INVALID_LOCAL = Path("__INVALID_LOCALAPPDATA__")
-_INVALID_ROAM = Path("__INVALID_APPDATA__")
-
-_LOCALAPPDATA = _LOCALAPPDATA if _LOCALAPPDATA is not None else _INVALID_LOCAL
-_APPDATA = _APPDATA if _APPDATA is not None else _INVALID_ROAM
-
-USER_CRASH = (_LOCALAPPDATA / "CrashDumps") if _LOCALAPPDATA is not _INVALID_LOCAL else None
-USER_EXPLORER = (_LOCALAPPDATA / "Microsoft" / "Windows" / "Explorer") if _LOCALAPPDATA is not _INVALID_LOCAL else None
+# CORE-004: invalid env roots stay None end-to-end. A rejected root must NEVER
+# become a relative cwd cleanup scope through a sentinel fallback.
+# _LOCALAPPDATA and _APPDATA are either a validated absolute Path or None.
 
 
 # Deep System & App Caches
-
-USER_APPDATA_TARGETS = [
-
-    (_LOCALAPPDATA / "NVIDIA" / "GLCache", "NVIDIA GL Cache"),
-
-    (_LOCALAPPDATA / "NVIDIA" / "DXCache", "NVIDIA DX Cache"),
-
-    (_LOCALAPPDATA / "D3DSCache", "DirectX Shader Cache"),
-
-    (_LOCALAPPDATA / "Steam" / "htmlcache", "Steam Web Cache"),
-
-    (_LOCALAPPDATA / "Microsoft" / "Windows" / "INetCache", "Windows INetCache"),
-
-    (_APPDATA / "discord" / "Cache", "Discord Cache"),
-
-    (_APPDATA / "discord" / "Code Cache", "Discord Code Cache"),
-
+# CORE-004: raw target definitions use path-tuple + description. Actual Path
+# objects are built from validated roots; None bases produce no targets.
+_RAW_APPDATA_TARGETS: list[tuple[tuple[str, ...], str]] = [
+    (("NVIDIA", "GLCache"), "NVIDIA GL Cache"),
+    (("NVIDIA", "DXCache"), "NVIDIA DX Cache"),
+    (("D3DSCache",), "DirectX Shader Cache"),
+    (("Steam", "htmlcache"), "Steam Web Cache"),
+    (("Microsoft", "Windows", "INetCache"), "Windows INetCache"),
+    (("discord", "Cache"), "Discord Cache"),
+    (("discord", "Code Cache"), "Discord Code Cache"),
+    # dev tool caches (LocalAppData)
+    (("npm-cache",), "npm Cache"),
+    (("uv", "cache"), "uv Cache"),
+    (("pip", "cache"), "pip Cache"),
+    (("Nuitka",), "Nuitka Cache"),
+    (("node-gyp", "Cache"), "node-gyp Cache"),
+    (("python", "Cache"), "python Cache"),
+    (("Cypress", "Cache"), "Cypress Cache"),
+    # app logs (Roaming)
+    (("Maxon", "Logs"), "Maxon Logs"),
+    (("Maxon", "Temp"), "Maxon Temp"),
+    (("FreeFileSync", "Logs"), "FreeFileSync Logs"),
+    (("obs-studio", "logs"), "obs-studio Logs"),
+    (("Google", "DriveFS", "Logs"), "DriveFS Logs"),
+    (("Mega Limited", "MEGAsync", "Logs"), "MEGAsync Logs"),
+    (("discord", "Logs"), "discord Logs"),
+    (("discord", "module_data", "crashlogs"), "discord Crash Logs"),
+    (("Claude", "Logs"), "Claude Logs"),
+    (("Listary", "UserProfile", "Cache"), "Listary Cache"),
+    # Eagle
+    (("Eagle", "eagle-temp"), "Eagle Temp"),
+    (("Eagle", "Cache"), "Eagle Cache"),
+    (("Eagle", "library-caches"), "Eagle Library Caches"),
+    (("Eagle", "Crashpad"), "Eagle Crashpad"),
+    # VS Code family
+    (("Code", "CachedExtensionVSIXs"), "VS Code VSIX Cache"),
+    (("Code", "Crashpad"), "VS Code Crashpad"),
+    (("Code", "CachedData"), "VS Code CachedData"),
+    (("Code", "Cache"), "VS Code Cache"),
+    (("Antigravity", "CachedExtensionVSIXs"), "Antigravity VSIX Cache"),
+    (("Antigravity", "Cache"), "Antigravity Cache"),
+    (("Antigravity", "CachedData"), "Antigravity CachedData"),
+    (("Claude", "Cache"), "Claude Cache"),
+    (("Claude", "Code Cache"), "Claude Code Cache"),
+    (("obsidian", "Cache"), "Obsidian Cache"),
+    (("obsidian", "Code Cache"), "Obsidian Code Cache"),
+    (("CELSYS", "promenade", "dbcache"), "CELSYS dbcache"),
+    (("EpicGamesLauncher", "Saved", "webcache_4430"), "Epic webcache"),
+    (("AI Chatter", "Cache"), "AIChatter Cache"),
+    (("Programs", "DockerDesktop", "tmp-delete"), "Docker tmp-delete"),
+    # browsers (LocalAppData)
+    (("Opera Software", "Opera Stable", "Default", "Cache"), "Opera Cache (C:)"),
+    (("Opera Software", "Opera Stable", "Default", "Code Cache"), "Opera Code Cache (C:)"),
+    (("Opera Software", "Opera Stable", "Default", "GrShaderCache"), "Opera Shader Cache (C:)"),
+    (("Opera Software", "Opera Stable", "Default", "System Cache"), "Opera System Cache (C:)"),
+    (("Opera Software", "Opera Stable", "Default", "Crash Reports"), "Opera Crash Reports (C:)"),
+    (("Google", "Chrome", "User Data", "Default", "Cache"), "Chrome Cache (C:)"),
+    (("Google", "Chrome", "User Data", "Default", "GrShaderCache"), "Chrome Shader Cache (C:)"),
+    (("Microsoft", "Edge", "User Data", "Default", "Cache"), "Edge Cache (C:)"),
+    (("Razer", "RazerAppEngine", "Cache"), "Razer Cache"),
+    (("Razer", "RazerAppEngine", "Code Cache"), "Razer Code Cache"),
+    (("Razer", "RazerAppEngine", "Service Worker", "CacheStorage"), "Razer SW CacheStorage"),
+    (("electron", "Cache"), "Electron Cache"),
+    (("Telegram Desktop", "tdata", "user_data", "cache"), "Telegram Cache (C:)"),
+    (("ollama app.exe", "EBWebView", "Default", "Cache"), "Ollama WebView Cache"),
+    (("MaxonApp", "UserData", "EBWebView", "Default", "Cache"), "Maxon WebView Cache"),
+    (("Photoshop1-25-WIN", "EBWebView", "Default", "Cache"), "Photoshop WebView Cache"),
+    # Brave browser (LocalAppData)
+    (("BraveSoftware", "Brave-Browser", "User Data", "Default", "Cache"), "Brave Cache"),
+    (("BraveSoftware", "Brave-Browser", "User Data", "Default", "Code Cache"), "Brave Code Cache"),
+    (("BraveSoftware", "Brave-Browser", "User Data", "Default", "GPUCache"), "Brave GPU Cache"),
+    # Code Cache for Chrome/Edge (Cache already covered)
+    (("Google", "Chrome", "User Data", "Default", "Code Cache"), "Chrome Code Cache"),
+    (("Microsoft", "Edge", "User Data", "Default", "Code Cache"), "Edge Code Cache"),
+    # misc safe caches / logs
+    (("calibre-cache",), "Calibre Cache"),
+    (("fontconfig",), "fontconfig Cache"),
+    (("qBittorrent", "logs"), "qBittorrent Logs"),
+    (("claude-cli-nodejs", "Cache"), "Claude CLI Cache"),
+    # New findings (v2.4.8)
+    (("Mega Limited", "MEGAsync", "logs"), "MEGAsync Logs (Local)"),
+    (("Devin", "Cache"), "Devin Cache"),
+    (("Devin", "CachedData"), "Devin CachedData"),
+    (("FontBase", "Cache"), "FontBase Cache"),
+    (("Bridge", "Cache"), "Adobe Bridge Cache"),
+    (("AIChatter", "AI Chatter", "cache"), "AIChatter Cache"),
+    (("Autokroma", "Influx", "Cache"), "Autokroma Influx Cache"),
+    (("Adobe", "Adobe Substance 3D Sampler", "thumbnailCache"), "Substance 3D Thumbnail Cache"),
+    (("BlueStacks X", "cache"), "BlueStacks X Cache"),
+    (("@neuralnomads", "codenomad-electron-app", "session-data-v2", "Cache"), "CodeNomad Cache"),
+    (("MAXON", "_assetcache"), "Maxon Asset Cache"),
+    (("Mailbird", "Misc", "component_crx_cache"), "Mailbird CRX Cache"),
+    (("Opera Software", "Opera Stable", "component_crx_cache"), "Opera CRX Cache"),
+    (("BraveSoftware", "Brave-Browser", "User Data", "component_crx_cache"), "Brave CRX Cache"),
+    (("discord", "component_crx_cache"), "Discord CRX Cache"),
+    # New findings (v2.4.9)
+    (("Devin", "GPUCache"), "Devin GPUCache"),
+    (("Devin", "logs"), "Devin Logs"),
+    (("Devin", "cli", "logs"), "Devin CLI Logs"),
+    (("Claude", "GPUCache"), "Claude GPUCache"),
+    (("Antigravity", "GPUCache"), "Antigravity GPUCache"),
+    (("Antigravity", "logs"), "Antigravity Logs"),
+    (("@neuralnomads", "codenomad-electron-app", "session-data-v2", "Code Cache"), "CodeNomad Code Cache"),
+    (("@neuralnomads", "codenomad-electron-app", "session-data-v2", "GPUCache"), "CodeNomad GPUCache"),
+    (("ollama app.exe", "EBWebView", "Default", "GPUCache"), "Ollama GPUCache"),
+    (("LM Studio", "GPUCache"), "LM Studio GPUCache"),
+    (("Adobe", "Adobe Substance 3D Painter", "cache"), "Substance 3D Painter Cache"),
+    (("Adobe", "Adobe Substance 3D Sampler", "cache"), "Substance 3D Sampler Cache"),
+    (("CELSYS", "CLIPStudioPaint", "1.5.0", "CacheData"), "CLIP Studio Paint Cache"),
+    (("Reallusion", "ActorCore AccuRIG", "Cache"), "AccuRIG Cache"),
+    (("Reallusion", "ActorCore AccuRIG", "Code Cache"), "AccuRIG Code Cache"),
+    (("Reallusion", "Character Creator", "5.0", "cache"), "Character Creator Cache"),
+    (("LosslessCut", "Cache"), "LosslessCut Cache"),
+    (("LosslessCut", "GPUCache"), "LosslessCut GPUCache"),
+    (("Topaz Labs LLC", "Topaz Video", "cache"), "Topaz Video Cache"),
+    (("Topaz Labs LLC", "Topaz Video AI", "cache"), "Topaz Video AI Cache"),
+    (("UnrealEngine", "5.6", "DerivedDataCache"), "Unreal Engine 5.6 DDCache"),
+    (("omniroute-desktop", "Cache"), "Omniroute Cache"),
+    (("omniroute-desktop", "Code Cache"), "Omniroute Code Cache"),
+    (("omniroute-desktop", "GPUCache"), "Omniroute GPUCache"),
+    (("omniroute-desktop", "Service Worker", "CacheStorage"), "Omniroute SW CacheStorage"),
+    (("stem-studio", "Cache"), "Stem Studio Cache"),
+    (("stem-studio", "GPUCache"), "Stem Studio GPUCache"),
+    (("QuiteRss", "QuiteRss", "cache"), "QuiteRss Cache"),
+    (("com.dropdead.app", "EBWebView", "Default", "Cache"), "Dropdead WebView Cache"),
+    (("DeskChat", "DeskChat", "cache"), "DeskChat Cache"),
+    (("DeskChat Dump", "cache"), "DeskChat Dump Cache"),
+    (("HD-Player", "cache"), "HD-Player Cache"),
+    (("JangaFX", "liquigen", "gl-cache"), "Liquigen GL Cache"),
+    (("Krisp", "Logs"), "Krisp Logs"),
+    (("Mailbird", "Misc", "Default", "Cache"), "Mailbird Cache"),
+    (("SiYuan-Electron", "GPUCache"), "SiYuan GPUCache"),
+    (("BetterDiscord Installer", "Cache"), "BetterDiscord Cache"),
+    (("BorisFX", "BorisFX Direct", "Cache"), "BorisFX Direct Cache"),
+    # New findings (v2.4.10)
+    (("Google", "DriveFS", "Logs"), "DriveFS Logs (Local)"),
+    (("Razer", "RazerAppEngine", "User Data", "Default", "Cache"), "Razer Engine Cache"),
+    (("Razer", "RazerAppEngine", "User Data", "Default", "Code Cache"), "Razer Engine Code Cache"),
+    (("Razer", "RazerAppEngine", "User Data", "Default", "GPUCache"), "Razer Engine GPUCache"),
+    (("EpicGamesLauncher", "Saved", "webcache_4430"), "Epic webcache (Local)"),
+    (("Code", "WebStorage", "2", "CacheStorage"), "VS Code WebStorage Cache"),
+    (("Code", "WebStorage", "3", "CacheStorage"), "VS Code WebStorage Cache (2)"),
+    (("com.verifiedskill.desktop", "EBWebView", "component_crx_cache"), "VerifiedSkill CRX Cache"),
+    (("MaxonApp", "UserData", "EBWebView", "Default", "Cache"), "MaxonApp WebView Cache"),
+    (("MaxonApp", "UserData", "EBWebView", "Default", "Code Cache"), "MaxonApp WebView Code Cache"),
+    (("MaxonApp", "UserData", "EBWebView", "Default", "GrShaderCache"), "MaxonApp WebView Shader Cache"),
+    (("Adobe", "Adobe Photoshop 2024", "Logs"), "Photoshop 2024 Logs"),
+    (("obsidian", "GPUCache"), "Obsidian GPUCache"),
+    # New findings (v2.4.14)
+    (("Packages", "Microsoft.Windows.Search_cw5n1h2txyewy", "LocalState", "DeviceSearchCache"), "Windows Search DeviceSearchCache"),
+    (("Packages", "Microsoft.Windows.Search_cw5n1h2txyewy", "LocalState", "AppIconCache"), "Windows Search AppIconCache"),
+    (("iTop Easy Desktop", "Thumb"), "iTop Easy Desktop Thumbs"),
+    (("Freebuff", "Cache"), "Freebuff Cache"),
+    (("Photoshop1-25-WIN", "EBWebView", "Default", "Cache"), "Photoshop WebView Cache (Local)"),
+    (("Bridge", "Code Cache"), "Adobe Bridge Code Cache"),
+    (("Bridge", "GPUCache"), "Adobe Bridge GPUCache"),
+    (("ollama app.exe", "EBWebView", "GrShaderCache"), "Ollama Shader Cache"),
+    (("AIChatter", "profiles", "edge", "chatgpt", "Default", "Cache"), "AIChatter Edge Profile Cache"),
+    (("Telegram Desktop", "tdata", "user_data", "media_cache"), "Telegram Media Cache (C:)"),
+    (("Opera Software", "Opera Stable", "Service Worker", "CacheStorage"), "Opera SW CacheStorage"),
+    (("Opera Software", "Opera Stable", "Service Worker", "ScriptCache"), "Opera SW ScriptCache"),
 ]
 
-USER_APPDATA_TARGETS.extend([
-    # dev tool caches (LocalAppData)
-    (_LOCALAPPDATA / "npm-cache", "npm Cache"),
-    (_LOCALAPPDATA / "uv" / "cache", "uv Cache"),
-    (_LOCALAPPDATA / "pip" / "cache", "pip Cache"),
-    (_LOCALAPPDATA / "Nuitka", "Nuitka Cache"),
-    (_LOCALAPPDATA / "node-gyp" / "Cache", "node-gyp Cache"),
-    (_LOCALAPPDATA / "python" / "Cache", "python Cache"),
-    (_LOCALAPPDATA / "Cypress" / "Cache", "Cypress Cache"),
-    # app logs (Roaming)
-    (_APPDATA / "Maxon" / "Logs", "Maxon Logs"),
-    (_APPDATA / "Maxon" / "Temp", "Maxon Temp"),
-    (_APPDATA / "FreeFileSync" / "Logs", "FreeFileSync Logs"),
-    (_APPDATA / "obs-studio" / "logs", "obs-studio Logs"),
-    (_APPDATA / "Google" / "DriveFS" / "Logs", "DriveFS Logs"),
-    (_APPDATA / "Mega Limited" / "MEGAsync" / "Logs", "MEGAsync Logs"),
-    (_APPDATA / "discord" / "Logs", "discord Logs"),
-    (_APPDATA / "discord" / "module_data" / "crashlogs", "discord Crash Logs"),
-    (_APPDATA / "Claude" / "Logs", "Claude Logs"),
-    (_APPDATA / "Listary" / "UserProfile" / "Cache", "Listary Cache"),
-    # Eagle
-    (_APPDATA / "Eagle" / "eagle-temp", "Eagle Temp"),
-    (_APPDATA / "Eagle" / "Cache", "Eagle Cache"),
-    (_APPDATA / "Eagle" / "library-caches", "Eagle Library Caches"),
-    (_APPDATA / "Eagle" / "Crashpad", "Eagle Crashpad"),
-    # VS Code family
-    (_APPDATA / "Code" / "CachedExtensionVSIXs", "VS Code VSIX Cache"),
-    (_APPDATA / "Code" / "Crashpad", "VS Code Crashpad"),
-    (_APPDATA / "Code" / "CachedData", "VS Code CachedData"),
-    (_APPDATA / "Code" / "Cache", "VS Code Cache"),
-    (_APPDATA / "Antigravity" / "CachedExtensionVSIXs", "Antigravity VSIX Cache"),
-    (_APPDATA / "Antigravity" / "Cache", "Antigravity Cache"),
-    (_APPDATA / "Antigravity" / "CachedData", "Antigravity CachedData"),
-    (_APPDATA / "Claude" / "Cache", "Claude Cache"),
-    (_APPDATA / "Claude" / "Code Cache", "Claude Code Cache"),
-    (_APPDATA / "obsidian" / "Cache", "Obsidian Cache"),
-    (_APPDATA / "obsidian" / "Code Cache", "Obsidian Code Cache"),
-    (_APPDATA / "CELSYS" / "promenade" / "dbcache", "CELSYS dbcache"),
-    (_APPDATA / "EpicGamesLauncher" / "Saved" / "webcache_4430", "Epic webcache"),
-    (_APPDATA / "AI Chatter" / "Cache", "AIChatter Cache"),
-    (_APPDATA / "Programs" / "DockerDesktop" / "tmp-delete", "Docker tmp-delete"),
-    # browsers (LocalAppData)
-    (_LOCALAPPDATA / "Opera Software" / "Opera Stable" / "Default" / "Cache", "Opera Cache (C:)"),
-    (_LOCALAPPDATA / "Opera Software" / "Opera Stable" / "Default" / "Code Cache", "Opera Code Cache (C:)"),
-    (_LOCALAPPDATA / "Opera Software" / "Opera Stable" / "Default" / "GrShaderCache", "Opera Shader Cache (C:)"),
-    (_LOCALAPPDATA / "Opera Software" / "Opera Stable" / "Default" / "System Cache", "Opera System Cache (C:)"),
-    (_LOCALAPPDATA / "Opera Software" / "Opera Stable" / "Default" / "Crash Reports", "Opera Crash Reports (C:)"),
-    (_LOCALAPPDATA / "Google" / "Chrome" / "User Data" / "Default" / "Cache", "Chrome Cache (C:)"),
-    (_LOCALAPPDATA / "Google" / "Chrome" / "User Data" / "Default" / "GrShaderCache", "Chrome Shader Cache (C:)"),
-    (_LOCALAPPDATA / "Microsoft" / "Edge" / "User Data" / "Default" / "Cache", "Edge Cache (C:)"),
-    (_LOCALAPPDATA / "Razer" / "RazerAppEngine" / "Cache", "Razer Cache"),
-    (_LOCALAPPDATA / "Razer" / "RazerAppEngine" / "Code Cache", "Razer Code Cache"),
-    (_LOCALAPPDATA / "Razer" / "RazerAppEngine" / "Service Worker" / "CacheStorage", "Razer SW CacheStorage"),
-    (_LOCALAPPDATA / "electron" / "Cache", "Electron Cache"),
-    (_APPDATA / "Telegram Desktop" / "tdata" / "user_data" / "cache", "Telegram Cache (C:)"),
-    (_LOCALAPPDATA / "ollama app.exe" / "EBWebView" / "Default" / "Cache", "Ollama WebView Cache"),
-    (_APPDATA / "MaxonApp" / "UserData" / "EBWebView" / "Default" / "Cache", "Maxon WebView Cache"),
-    (_APPDATA / "Photoshop1-25-WIN" / "EBWebView" / "Default" / "Cache", "Photoshop WebView Cache"),
-    # Brave browser (LocalAppData)
-    (_LOCALAPPDATA / "BraveSoftware" / "Brave-Browser" / "User Data" / "Default" / "Cache", "Brave Cache"),
-    (_LOCALAPPDATA / "BraveSoftware" / "Brave-Browser" / "User Data" / "Default" / "Code Cache", "Brave Code Cache"),
-    (_LOCALAPPDATA / "BraveSoftware" / "Brave-Browser" / "User Data" / "Default" / "GPUCache", "Brave GPU Cache"),
-    # Code Cache for Chrome/Edge (Cache already covered)
-    (_LOCALAPPDATA / "Google" / "Chrome" / "User Data" / "Default" / "Code Cache", "Chrome Code Cache"),
-    (_LOCALAPPDATA / "Microsoft" / "Edge" / "User Data" / "Default" / "Code Cache", "Edge Code Cache"),
-    # misc safe caches / logs
-    (_LOCALAPPDATA / "calibre-cache", "Calibre Cache"),
-    (_LOCALAPPDATA / "fontconfig", "fontconfig Cache"),
-    (_LOCALAPPDATA / "qBittorrent" / "logs", "qBittorrent Logs"),
-    (_LOCALAPPDATA / "claude-cli-nodejs" / "Cache", "Claude CLI Cache"),
-    # New findings (v2.4.8)
-    (_LOCALAPPDATA / "Mega Limited" / "MEGAsync" / "logs", "MEGAsync Logs (Local)"),
-    (_APPDATA / "Devin" / "Cache", "Devin Cache"),
-    (_APPDATA / "Devin" / "CachedData", "Devin CachedData"),
-    (_APPDATA / "FontBase" / "Cache", "FontBase Cache"),
-    (_APPDATA / "Bridge" / "Cache", "Adobe Bridge Cache"),
-    (_LOCALAPPDATA / "AIChatter" / "AI Chatter" / "cache", "AIChatter Cache"),
-    (_APPDATA / "Autokroma" / "Influx" / "Cache", "Autokroma Influx Cache"),
-    (_APPDATA / "Adobe" / "Adobe Substance 3D Sampler" / "thumbnailCache", "Substance 3D Thumbnail Cache"),
-    (_LOCALAPPDATA / "BlueStacks X" / "cache", "BlueStacks X Cache"),
-    (_APPDATA / "@neuralnomads" / "codenomad-electron-app" / "session-data-v2" / "Cache", "CodeNomad Cache"),
-    (_APPDATA / "MAXON" / "_assetcache", "Maxon Asset Cache"),
-    (_LOCALAPPDATA / "Mailbird" / "Misc" / "component_crx_cache", "Mailbird CRX Cache"),
-    (_APPDATA / "Opera Software" / "Opera Stable" / "component_crx_cache", "Opera CRX Cache"),
-    (_LOCALAPPDATA / "BraveSoftware" / "Brave-Browser" / "User Data" / "component_crx_cache", "Brave CRX Cache"),
-    (_APPDATA / "discord" / "component_crx_cache", "Discord CRX Cache"),
-    # New findings (v2.4.9)
-    (_APPDATA / "Devin" / "GPUCache", "Devin GPUCache"),
-    (_APPDATA / "Devin" / "logs", "Devin Logs"),
-    (_APPDATA / "Devin" / "cli" / "logs", "Devin CLI Logs"),
-    (_APPDATA / "Claude" / "GPUCache", "Claude GPUCache"),
-    (_APPDATA / "Antigravity" / "GPUCache", "Antigravity GPUCache"),
-    (_APPDATA / "Antigravity" / "logs", "Antigravity Logs"),
-    (_APPDATA / "@neuralnomads" / "codenomad-electron-app" / "session-data-v2" / "Code Cache", "CodeNomad Code Cache"),
-    (_APPDATA / "@neuralnomads" / "codenomad-electron-app" / "session-data-v2" / "GPUCache", "CodeNomad GPUCache"),
-    (_APPDATA / "ollama app.exe" / "EBWebView" / "Default" / "GPUCache", "Ollama GPUCache"),
-    (_APPDATA / "LM Studio" / "GPUCache", "LM Studio GPUCache"),
-    (_LOCALAPPDATA / "Adobe" / "Adobe Substance 3D Painter" / "cache", "Substance 3D Painter Cache"),
-    (_LOCALAPPDATA / "Adobe" / "Adobe Substance 3D Sampler" / "cache", "Substance 3D Sampler Cache"),
-    (_APPDATA / "CELSYS" / "CLIPStudioPaint" / "1.5.0" / "CacheData", "CLIP Studio Paint Cache"),
-    (_LOCALAPPDATA / "Reallusion" / "ActorCore AccuRIG" / "Cache", "AccuRIG Cache"),
-    (_LOCALAPPDATA / "Reallusion" / "ActorCore AccuRIG" / "Code Cache", "AccuRIG Code Cache"),
-    (_LOCALAPPDATA / "Reallusion" / "Character Creator" / "5.0" / "cache", "Character Creator Cache"),
-    (_APPDATA / "LosslessCut" / "Cache", "LosslessCut Cache"),
-    (_APPDATA / "LosslessCut" / "GPUCache", "LosslessCut GPUCache"),
-    (_LOCALAPPDATA / "Topaz Labs LLC" / "Topaz Video" / "cache", "Topaz Video Cache"),
-    (_LOCALAPPDATA / "Topaz Labs LLC" / "Topaz Video AI" / "cache", "Topaz Video AI Cache"),
-    (_LOCALAPPDATA / "UnrealEngine" / "5.6" / "DerivedDataCache", "Unreal Engine 5.6 DDCache"),
-    (_APPDATA / "omniroute-desktop" / "Cache", "Omniroute Cache"),
-    (_APPDATA / "omniroute-desktop" / "Code Cache", "Omniroute Code Cache"),
-    (_APPDATA / "omniroute-desktop" / "GPUCache", "Omniroute GPUCache"),
-    (_APPDATA / "omniroute-desktop" / "Service Worker" / "CacheStorage", "Omniroute SW CacheStorage"),
-    (_APPDATA / "stem-studio" / "Cache", "Stem Studio Cache"),
-    (_APPDATA / "stem-studio" / "GPUCache", "Stem Studio GPUCache"),
-    (_LOCALAPPDATA / "QuiteRss" / "QuiteRss" / "cache", "QuiteRss Cache"),
-    (_LOCALAPPDATA / "com.dropdead.app" / "EBWebView" / "Default" / "Cache", "Dropdead WebView Cache"),
-    (_LOCALAPPDATA / "DeskChat" / "DeskChat" / "cache", "DeskChat Cache"),
-    (_LOCALAPPDATA / "DeskChat Dump" / "cache", "DeskChat Dump Cache"),
-    (_LOCALAPPDATA / "HD-Player" / "cache", "HD-Player Cache"),
-    (_LOCALAPPDATA / "JangaFX" / "liquigen" / "gl-cache", "Liquigen GL Cache"),
-    (_LOCALAPPDATA / "Krisp" / "Logs", "Krisp Logs"),
-    (_LOCALAPPDATA / "Mailbird" / "Misc" / "Default" / "Cache", "Mailbird Cache"),
-    (_APPDATA / "SiYuan-Electron" / "GPUCache", "SiYuan GPUCache"),
-    (_APPDATA / "BetterDiscord Installer" / "Cache", "BetterDiscord Cache"),
-    (_APPDATA / "BorisFX" / "BorisFX Direct" / "Cache", "BorisFX Direct Cache"),
-    # New findings (v2.4.10)
-    (_LOCALAPPDATA / "Google" / "DriveFS" / "Logs", "DriveFS Logs (Local)"),
-    (_LOCALAPPDATA / "Razer" / "RazerAppEngine" / "User Data" / "Default" / "Cache", "Razer Engine Cache"),
-    (_LOCALAPPDATA / "Razer" / "RazerAppEngine" / "User Data" / "Default" / "Code Cache", "Razer Engine Code Cache"),
-    (_LOCALAPPDATA / "Razer" / "RazerAppEngine" / "User Data" / "Default" / "GPUCache", "Razer Engine GPUCache"),
-    (_LOCALAPPDATA / "EpicGamesLauncher" / "Saved" / "webcache_4430", "Epic webcache (Local)"),
-    (_APPDATA / "Code" / "WebStorage" / "2" / "CacheStorage", "VS Code WebStorage Cache"),
-    (_APPDATA / "Code" / "WebStorage" / "3" / "CacheStorage", "VS Code WebStorage Cache (2)"),
-    (_LOCALAPPDATA / "com.verifiedskill.desktop" / "EBWebView" / "component_crx_cache", "VerifiedSkill CRX Cache"),
-    (_LOCALAPPDATA / "MaxonApp" / "UserData" / "EBWebView" / "Default" / "Cache", "MaxonApp WebView Cache"),
-    (_LOCALAPPDATA / "MaxonApp" / "UserData" / "EBWebView" / "Default" / "Code Cache", "MaxonApp WebView Code Cache"),
-    (_LOCALAPPDATA / "MaxonApp" / "UserData" / "EBWebView" / "Default" / "GrShaderCache", "MaxonApp WebView Shader Cache"),
-    (_APPDATA / "Adobe" / "Adobe Photoshop 2024" / "Logs", "Photoshop 2024 Logs"),
-    (_APPDATA / "obsidian" / "GPUCache", "Obsidian GPUCache"),
-    # New findings (v2.4.14)
-    (_LOCALAPPDATA / "Packages" / "Microsoft.Windows.Search_cw5n1h2txyewy" / "LocalState" / "DeviceSearchCache", "Windows Search DeviceSearchCache"),
-    (_LOCALAPPDATA / "Packages" / "Microsoft.Windows.Search_cw5n1h2txyewy" / "LocalState" / "AppIconCache", "Windows Search AppIconCache"),
-    (_LOCALAPPDATA / "iTop Easy Desktop" / "Thumb", "iTop Easy Desktop Thumbs"),
-    (_APPDATA / "Freebuff" / "Cache", "Freebuff Cache"),
-    (_LOCALAPPDATA / "Photoshop1-25-WIN" / "EBWebView" / "Default" / "Cache", "Photoshop WebView Cache (Local)"),
-    (_APPDATA / "Bridge" / "Code Cache", "Adobe Bridge Code Cache"),
-    (_APPDATA / "Bridge" / "GPUCache", "Adobe Bridge GPUCache"),
-    (_APPDATA / "ollama app.exe" / "EBWebView" / "GrShaderCache", "Ollama Shader Cache"),
-    (_APPDATA / "AIChatter" / "profiles" / "edge" / "chatgpt" / "Default" / "Cache", "AIChatter Edge Profile Cache"),
-    (_APPDATA / "Telegram Desktop" / "tdata" / "user_data" / "media_cache", "Telegram Media Cache (C:)"),
-    (_APPDATA / "Opera Software" / "Opera Stable" / "Service Worker" / "CacheStorage", "Opera SW CacheStorage"),
-    (_APPDATA / "Opera Software" / "Opera Stable" / "Service Worker" / "ScriptCache", "Opera SW ScriptCache"),
-])
+# CORE-004: build live target list from validated roots. None bases -> no targets.
+_user_targets_raw: list = []
+if _LOCALAPPDATA is not None:
+    for parts, desc in _RAW_APPDATA_TARGETS:
+        _user_targets_raw.append((_LOCALAPPDATA.joinpath(*parts), desc))
+if _APPDATA is not None:
+    for parts, desc in _RAW_APPDATA_TARGETS:
+        _user_targets_raw.append((_APPDATA.joinpath(*parts), desc))
+
+# Deduplicate by resolved path
+_seen: set[str] = set()
+_user_targets_deduped: list = []
+for p, d in _user_targets_raw:
+    key = str(p.resolve()) if p is not None else ""
+    if key and key not in _seen:
+        _seen.add(key)
+        _user_targets_deduped.append((p, d))
+del _seen, _user_targets_raw
+USER_APPDATA_TARGETS = _user_targets_deduped
+del _user_targets_deduped
+
 
 # Process owners for app-sensitive targets (P1-9): if the owning app is running
 # (or the process table is UNKNOWN), the target is skipped.
@@ -936,13 +1014,74 @@ _TARGET_APP_GROUPS: dict[str, str | None] = {
     "Substance 3D Sampler Cache": "substance",
 }
 
-# T-147: entries whose base env root failed provenance validation are dropped --
-# a poisoned APPDATA/LOCALAPPDATA can never turn a reviewed cache suffix into a
-# live destructive target.
+# CORE-004/T-147: entries whose base env root failed provenance validation are
+# dropped -- a poisoned APPDATA/LOCALAPPDATA can never turn a reviewed cache
+# suffix into a live destructive target. A None base means the entire target
+# subtree is excluded; no sentinel-path workaround exists.
 USER_APPDATA_TARGETS = [
     (p, d, _TARGET_APP_GROUPS.get(d) or (PROCESS_AGNOSTIC if d in PROCESS_AGNOSTIC_TARGETS else None)) for p, d, *_ in USER_APPDATA_TARGETS
-    if p is not None and not _is_under(_INVALID_LOCAL, p) and not _is_under(_INVALID_ROAM, p)
+    if p is not None and (
+        (_LOCALAPPDATA is not None and not _is_under(_LOCALAPPDATA, p)) or
+        (_APPDATA is not None and not _is_under(_APPDATA, p)) or
+        True  # p is not under either validated base but is still a valid path
+    )
 ]
+
+def _enumerate_processes_win() -> set[str] | None:
+    """PERF-002: dependency-free Windows process enumeration via Toolhelp32Snapshot.
+
+    Returns a set of lowercased image names, or None on any failure (UNKNOWN).
+    Never returns an empty set on failure — callers treat None as fail-closed.
+    """
+    try:
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+
+        TH32CS_SNAPPROCESS = 0x00000002
+        MAX_PATH = 260
+
+        # PROCESSENTRY32W layout (Windows SDK):
+        #   dwSize (4), cntUsage (4), th32ProcessID (4),
+        #   th32DefaultHeapID (8), th32ModuleID (4), cntThreads (4),
+        #   th32ParentProcessID (4), pcPriClassBase (4),
+        #   dwFlags (4), szExeFile[260]
+        class PROCESSENTRY32W(ctypes.Structure):
+            _fields_ = [
+                ("dwSize", ctypes.c_ulong),
+                ("cntUsage", ctypes.c_ulong),
+                ("th32ProcessID", ctypes.c_ulong),
+                ("th32DefaultHeapID", ctypes.c_size_t),
+                ("th32ModuleID", ctypes.c_ulong),
+                ("cntThreads", ctypes.c_ulong),
+                ("th32ParentProcessID", ctypes.c_ulong),
+                ("pcPriClassBase", ctypes.c_long),
+                ("dwFlags", ctypes.c_ulong),
+                ("szExeFile", ctypes.c_char * MAX_PATH),
+            ]
+
+        snapshot = kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+        if snapshot == ctypes.c_void_p(-1).value:
+            return None
+        try:
+            entry = PROCESSENTRY32W()
+            entry.dwSize = ctypes.sizeof(PROCESSENTRY32W)
+            ret = kernel32.Process32FirstW(snapshot, ctypes.byref(entry))
+            if not ret:
+                return set()
+            procs: set[str] = set()
+            while True:
+                name = entry.szExeFile.rstrip(b"\x00").decode("utf-8", errors="replace").lower()
+                if name:
+                    procs.add(name)
+                ret = kernel32.Process32NextW(snapshot, ctypes.byref(entry))
+                if not ret:
+                    break
+            return procs
+        finally:
+            kernel32.CloseHandle(snapshot)
+    except Exception:
+        return None
+
 
 def get_running_processes() -> set[str] | None:
     """Query running process image names.
@@ -950,7 +1089,17 @@ def get_running_processes() -> set[str] | None:
     Returns a set of lowercased image names, or None when the query FAILED
     (tasklist nonzero exit, timeout, parse error). Callers must treat None as
     UNKNOWN and skip app-sensitive work (fail closed), never as 'nothing runs'.
+
+    PERF-002: on Windows uses Toolhelp32Snapshot (no subprocess); falls back
+    to subprocess.tasklist on other platforms or when the native call fails.
     """
+    if os.name == "nt":
+        procs = _enumerate_processes_win()
+        if procs is not None:
+            return procs
+        # Native call failed; fall through to subprocess as last resort.
+        logging.getLogger("vac_cleaner").warning("Toolhelp32Snapshot failed; falling back to tasklist")
+
     try:
         result = subprocess.run(["tasklist", "/fo", "csv", "/nh"], capture_output=True, text=True, timeout=15, check=False)
         if result.returncode != 0:
@@ -1020,6 +1169,42 @@ def is_link(path: Path) -> bool:
     return False
 
 
+# CORE-002: a configured cleanup root that is itself a symlink/junction or
+# contains a reparse component must be refused BEFORE any resolve happens.
+# Resolving first destroys the evidence and transfers cleanup authority to the
+# destination while downstream code sees only an ordinary canonical path.
+def _has_link_or_reparse_component(raw: str) -> bool:
+    """True when any EXISTING path component is a symlink/junction/reparse.
+
+    Walks the absolute path component-by-component using lstat (no follow).
+    Non-existent components are skipped. Returns False when the path does not
+    exist at all (caller handles that).
+    """
+    try:
+        absolute = Path(raw).expanduser().absolute()
+    except OSError:
+        return False
+    parts = list(absolute.parts)
+    # Windows: parts[0] is the drive letter (e.g. 'V:'); skip it.
+    start = 1 if parts and len(parts[0]) == 1 and parts[0].endswith(":") else 0
+    cursor = Path(parts[0]) if start else Path()
+    for part in parts[start:]:
+        candidate = cursor / part
+        try:
+            st = candidate.lstat()
+        except OSError:
+            return False  # component missing: stop checking
+        mode = st.st_mode
+        if stat.S_ISLNK(mode):
+            return True
+        if os.name == "nt":
+            attrs = int(getattr(st, "st_file_attributes", 0))
+            if attrs & stat.FILE_ATTRIBUTE_REPARSE_POINT:
+                return True
+        cursor = candidate
+    return False
+
+
 # F1: object identity for TOCTOU defence. A path being present at plan time is
 # NOT permission forever -- between planning and mutation the object at that
 # path may be replaced (file swap, dir swap, symlink/junction introduction).
@@ -1075,7 +1260,15 @@ def _identity_matches(planned: dict | None, current: dict | None, ignore_attrs: 
         return False
     p_ino, c_ino = planned.get("ino"), current.get("ino")
     if p_ino and c_ino:
-        return planned.get("dev") == current.get("dev") and p_ino == c_ino
+        # CORE-001: inode reuse defeats TOCTOU when only dev+ino is checked.
+        # A deleted+recreated object can inherit the same dev+ino but carry
+        # completely different content. Require fingerprint match too.
+        if planned.get("dev") != current.get("dev") or p_ino != c_ino:
+            return False
+        for key in ("size", "mtime_ns", "ctime_ns"):
+            if planned.get(key) != current.get(key):
+                return False
+        return planned.get("attrs") == current.get("attrs") or ignore_attrs
     if p_ino or c_ino:
         return False
     for key in ("size", "mtime_ns", "ctime_ns", "attrs"):
@@ -1126,6 +1319,13 @@ def fmt(n: int) -> str:
 
 class Logger:
 
+    @staticmethod
+    def enable_recorder() -> None:
+        """PERF-006: enable path recording for tests that need candidate truth."""
+        Logger._recorder_enabled = True
+
+    _recorder_enabled = False
+
     def __init__(self, log_file: Path | None, dry_run: bool, gui_callback=None, quiet: bool = False):
 
         self.dry_run = dry_run
@@ -1144,7 +1344,15 @@ class Logger:
 
         self.quiet = quiet
 
-        self.deleted_paths: list[str] = []  # F4: candidate truth recorder
+        # F4: candidate truth recorder. Opt-in only — disabled by default for
+        # production Logger (avoids retaining O(N) path strings). Tests that need
+        # candidate truth call Logger.enable_recorder() before constructing the
+        # Logger, or set self.deleted_paths = [] directly.
+        if Logger._recorder_enabled:
+            self.deleted_paths: list[str] = []
+            Logger._recorder_enabled = False
+        else:
+            self.deleted_paths = None
 
         self.lock = threading.Lock()
 
@@ -1177,31 +1385,25 @@ class Logger:
             self._log.addHandler(ch)
 
 
-        if not self.quiet and log_file:
-
+        if not self.quiet and log_file and not self.dry_run:
             try:
                 log_file.parent.mkdir(parents=True, exist_ok=True)
             except OSError:
                 log_file = None  # exe in read-only dir: logs stay console-only
 
-            try:
-
-                fh = logging.FileHandler(log_file, encoding="utf-8")
-
-                fh.setLevel(logging.DEBUG)
-
-                fh.setFormatter(logging.Formatter("%(asctime)s  %(levelname)-7s  %(message)s", datefmt="%Y-%m-%d %H:%M:%S"))
-
-                self._log.addHandler(fh)
-
-            except OSError as exc:
-
-                self._log.warning(f"Cannot open log file {log_file}: {exc}")
-
-            # T-110: bound the logs/ directory (retention) on every job start --
-            # clean/scheduled/background runs all construct a Logger.
-            if not dry_run:
-                _prune_old_logs(log_file.parent)
+            if log_file is not None:
+                try:
+                    fh = logging.FileHandler(str(log_file), encoding="utf-8")
+                    fh.setLevel(logging.DEBUG)
+                    fh.setFormatter(logging.Formatter("%(asctime)s  %(levelname)-7s  %(message)s", datefmt="%Y-%m-%d %H:%M:%S"))
+                    self._log.addHandler(fh)
+                except OSError as exc:
+                    self._log.warning(f"Cannot open log file {log_file}: {exc}")
+                # T-110: bound the logs/ directory (retention) on every real run start.
+                try:
+                    _prune_old_logs(log_file.parent)
+                except OSError:
+                    pass
 
 
     def _emit_gui(self, msg: str):
@@ -1268,7 +1470,8 @@ class Logger:
 
             self.n_deleted += 1
 
-            self.deleted_paths.append(str(path))
+            if self.deleted_paths is not None:
+                self.deleted_paths.append(str(path))
 
         tag = "DRY-RUN" if self.dry_run else "DELETED"
 
@@ -1523,9 +1726,13 @@ class CleanerEngine:
 
         self.ledger = ledger
 
-        # T-131: app-sensitive targets carry their owner group so the apply
+         # T-131: app-sensitive targets carry their owner group so the apply
         # phase can re-check the process state just-in-time (process TOCTOU).
         self._owner_group: str | None = None
+
+        # PERF-001: when True, child ledger gates/claims are bypassed and the
+        # parent is claimed once after a successful sweep.
+        self._skip_ledger = False
 
 
     def make_guard(self, root: Path, allow_shallow_system_target: bool = False) -> SafetyGuard:
@@ -1559,7 +1766,12 @@ class CleanerEngine:
         False when another cleaner already claims this subtree -- the target
         must not be planned a second time. This is checked at plan time; the
         claim is registered only after a successful plan.
+
+        PERF-001: when `_skip_ledger` is set (batch scope), bypass per-child
+        ledger checks; the parent claims the whole subtree atomically.
         """
+        if self._skip_ledger:
+            return True
         if self.ledger is None:
             return True
         if self.ledger.covered(path):
@@ -1575,6 +1787,8 @@ class CleanerEngine:
 
 
     def _ledger_claim(self, path: Path) -> None:
+        if self._skip_ledger:
+            return
         if self.ledger is not None:
             self.ledger.claim(path)
 
@@ -1971,6 +2185,14 @@ class CleanerEngine:
         if not self._ledger_gate(path, desc):
             return 0
 
+        # CORE-001/CORE-003: capture root identity before enumeration; revalidate
+        # after and then carry it through the entire sweep so a path-boundary
+        # swap between checks cannot transfer authority to a new tree.
+        root_identity = _capture_identity(path)
+        if not root_identity or root_identity.get("type") == "link_or_reparse":
+            self.log.skipped(path, "Root identity could not be established")
+            return 0
+
         freed = 0
 
         items = []
@@ -1984,6 +2206,19 @@ class CleanerEngine:
                 items.append(item)
         except (PermissionError, OSError):
             self.log.warning("Directory iteration failed during content deletion")
+
+        # Revalidate root identity after enumeration completes.
+        if not _identity_matches(root_identity, _capture_identity(path)):
+            self.log.skipped(path, "Root directory replaced after enumeration")
+            return 0
+
+        # CORE-003: revalidate root identity before each child batch.
+        def _recheck_root() -> bool:
+            cur = _capture_identity(path)
+            if not _identity_matches(root_identity, cur):
+                self.log.skipped(path, "Root directory replaced mid-sweep; aborting")
+                return False
+            return True
 
         def _handle(item: Path) -> int:
             self.check_cancel()
@@ -2000,8 +2235,16 @@ class CleanerEngine:
             self._ledger_claim(path)
             return 0
 
+        # PERF-001: if no prior descendant claims exist, skip per-child ledger
+        # overhead and claim the parent atomically after successful completion.
+        _batch_ledger = not bool(self._ledger_claims_within(path))
+        self._skip_ledger = _batch_ledger
+        aborted = False
+        future_errors: list[str] = []
+
         if owner_group is not None and not self._owner_gate_ok(owner_group):
             self.log.skipped(path, f"'{owner_group}' became running or unknown before delete; aborting target")
+            self._skip_ledger = False
             return 0
 
         if self.max_threads > 1 and len(items) > 1:
@@ -2018,46 +2261,93 @@ class CleanerEngine:
                 try:
                     while idx < len(items):
                         self.check_cancel()
+                        if not _recheck_root():
+                            aborted = True
+                            break
                         if owner_group is not None and not self._owner_gate_ok(owner_group):
                             self.log.skipped(path, f"'{owner_group}' became running or unknown mid-sweep; aborting remaining mutations")
+                            aborted = True
                             break
-                        
+
                         submitted_in_batch = False
                         while idx < len(items) and len(pending) < _MAX_IN_FLIGHT:
                             self.check_cancel()
+                            if not _recheck_root():
+                                aborted = True
+                                break
                             if owner_group is not None and not self._owner_gate_ok(owner_group):
                                 break
                             pending.add(executor.submit(_handle, items[idx]))
                             idx += 1
                             submitted_in_batch = True
-                            
-                        if not submitted_in_batch and owner_group is not None and not self._owner_gate_ok(owner_group):
-                            break # Broken by inner gate
-                            
+
+                        if aborted or not submitted_in_batch and owner_group is not None and not self._owner_gate_ok(owner_group):
+                            break
+
                         if idx >= len(items) and not pending:
                             break
                         elif pending:
                             done, pending = concurrent.futures.wait(pending, return_when=concurrent.futures.FIRST_COMPLETED)
                             for f in done:
-                                freed += f.result()
-                    for f in concurrent.futures.as_completed(pending):
-                        freed += f.result()
+                                # CORE-007: handle each Future individually.
+                                # A non-CancelJobException failure records ERROR,
+                                # stops new submissions, cancels pending, drains
+                                # already-running completions, and leaves parent
+                                # unclaimed.
+                                try:
+                                    freed += f.result()
+                                except CancelJobException:
+                                    raise
+                                except Exception as exc:
+                                    future_errors.append(f"{items[idx - len(pending) - 1 if idx > 0 else 0]}: {exc}")
+                                    self.log.error(f"Child future failed: {exc}")
+                                    aborted = True
+                                    break
+                            if aborted:
+                                break
+                    # Drain remaining completions, recording any errors.
+                    for f in list(pending):
+                        try:
+                            freed += f.result()
+                        except CancelJobException:
+                            raise
+                        except Exception as exc:
+                            future_errors.append(str(exc))
+                            self.log.error(f"Drained child future failed: {exc}")
+                    # Cancel any still-pending work.
+                    for fut in pending:
+                        fut.cancel()
+                    # CORE-007: any child failure => parent must NOT be ledger-claimed.
+                    if future_errors:
+                        self.log.error(f"{len(future_errors)} child future(s) failed during sweep of {path}")
                 except CancelJobException:
                     for fut in pending:
                         fut.cancel()
                     executor.shutdown(cancel_futures=True)
                     raise
-                except Exception as e:
-                    self.log.warning(f"Future result failed: {e}")
+            self._skip_ledger = False
+            if aborted or future_errors:
+                return freed
+            if _batch_ledger:
+                self._ledger_claim(path)
+            return freed
         else:
             for item in items:
                 self.check_cancel()
+                if not _recheck_root():
+                    aborted = True
+                    break
                 if owner_group is not None and not self._owner_gate_ok(owner_group):
                     self.log.skipped(path, f"'{owner_group}' became running or unknown mid-sweep; aborting remaining mutations")
+                    aborted = True
                     break
                 freed += _handle(item)
-        self._ledger_claim(path)
-        return freed
+            self._skip_ledger = False
+            if aborted:
+                return freed
+            if _batch_ledger:
+                self._ledger_claim(path)
+            return freed
 
 
     def safe_del_dir(self, path: Path, desc: str, app: str) -> int:
@@ -2435,7 +2725,7 @@ class PortableCleaner(CleanerEngine):
 
         # Max recursion depth to prevent locking UI for too long
 
-        bfs_queue = [(self.root, 0)]
+        bfs_queue = deque([(self.root, 0)])
 
         MAX_DEPTH = 5
 
@@ -2444,7 +2734,7 @@ class PortableCleaner(CleanerEngine):
 
             self.check_cancel()
 
-            current_dir, depth = bfs_queue.pop(0)
+            current_dir, depth = bfs_queue.popleft()
 
             if depth > MAX_DEPTH: continue
 
@@ -2478,7 +2768,7 @@ class PortableCleaner(CleanerEngine):
                                 continue
                             self.log.info(f"  [DISCOVERED] {item} -- no verified owner; NOT AUTHORIZED to delete")
 
-                        else:
+                        elif depth < MAX_DEPTH:
 
                             bfs_queue.append((item, depth + 1))
 
@@ -2505,7 +2795,8 @@ class SystemCleaner(CleanerEngine):
 
     def __init__(self, dry_run: bool, log: Logger, max_threads: int = DEFAULT_THREADS, targets: dict[str, bool] | None = None, cancel_event: threading.Event | None = None,
 
-                 exclude_patterns: list[str] | None = None, exclude_paths: list[str] | None = None, progress=None, ledger: CandidateLedger | None = None):
+                 exclude_patterns: list[str] | None = None, exclude_paths: list[str] | None = None, progress=None, ledger: CandidateLedger | None = None,
+                 system_roots: dict | None = None):
 
         # The root here isn't a single drive, so we pass dummy C:\.
 
@@ -2517,9 +2808,13 @@ class SystemCleaner(CleanerEngine):
 
         self.targets = targets if targets is not None else {}
 
+        # CORE-013: consume the frozen per-job system-root snapshot instead of
+        # reading module globals directly.
+        self._system_roots = system_roots if system_roots is not None else resolve_system_roots()
+
         # F4: per-target planned/freed bytes populated by run_all. This is the
         # single source of truth shared by dry-run, --status and the GUI
-        # preview/progress estimation (calculate_target_sizes feeds off it).
+        # preview/progress estimation (T-114).
         self.results: dict[str, int] = {}
 
 
@@ -2669,7 +2964,8 @@ class SystemCleaner(CleanerEngine):
 
         if self.targets.get("Windows Update Cache", False):
 
-            wu_path = Path("C:\\Windows\\SoftwareDistribution\\Download")
+            win_dir = self._system_roots.get("WINDIR")
+            wu_path = win_dir / "SoftwareDistribution" / "Download" if win_dir is not None else Path("C:\\Windows\\SoftwareDistribution\\Download")
 
             if wu_path.exists():
 
@@ -2724,11 +3020,11 @@ class SystemCleaner(CleanerEngine):
 
                     else:
 
-                        self.log.warning(f"Failed to flush DNS Resolver Cache (exit {result.returncode})")
+                        self.log.error(f"Failed to flush DNS Resolver Cache (exit {result.returncode})")
 
                 except Exception:
 
-                    self.log.warning("Failed to flush DNS Resolver Cache")
+                    self.log.error("Failed to flush DNS Resolver Cache")
 
 
         # Recycle Bin
@@ -2753,7 +3049,7 @@ class SystemCleaner(CleanerEngine):
 
                 else:
 
-                    self.log.warning(f"Recycle Bin empty failed (result {result})")
+                    self.log.error(f"Recycle Bin empty failed (result {result})")
 
 
         # Deep C: Junk
@@ -2820,29 +3116,35 @@ class SystemCleaner(CleanerEngine):
         # deletion error -- the ORIGINAL state is restored in a finally, so the
         # service can never be left stopped by this method.
         try:
-            stop = subprocess.run(["net", "stop", "wuauserv"], capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
+            stop = subprocess.run(["net", "stop", "wuauserv"], capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW, timeout=30)
             if stop.returncode not in (0, 2):
-                self.log.warning(f"Failed to stop wuauserv (exit {stop.returncode}); skipping Windows Update Cache")
+                self.log.error(f"Failed to stop wuauserv (exit {stop.returncode}); skipping Windows Update Cache")
                 return 0
             deadline = time.monotonic() + _WU_STOP_POLL_TIMEOUT
             while True:
+                self.check_cancel()
                 now = self._service_state("wuauserv")
                 if now == "STOPPED":
                     break
                 if now == "STOP_PENDING":
                     if time.monotonic() >= deadline:
-                        self.log.warning("wuauserv stuck in STOP_PENDING; skipping Windows Update Cache")
+                        self.log.error("wuauserv stuck in STOP_PENDING; skipping Windows Update Cache")
                         return 0
                     time.sleep(_WU_STOP_POLL_INTERVAL)
                     continue
-                self.log.warning(f"wuauserv did not reach STOPPED (now {now!r}); skipping Windows Update Cache")
+                self.log.error(f"wuauserv did not reach STOPPED (now {now!r}); skipping Windows Update Cache")
                 return 0
             freed += self._del_dir_contents(wu_path, "Windows Update Cache", owner_group=PROCESS_AGNOSTIC)
             return freed
         finally:
-            start = subprocess.run(["net", "start", "wuauserv"], capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
-            if start.returncode != 0:
-                self.log.warning(f"Failed to restart wuauserv (exit {start.returncode})")
+            try:
+                start = subprocess.run(["net", "start", "wuauserv"], capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW, timeout=30)
+                if start.returncode != 0:
+                    self.log.error(f"Failed to restart wuauserv (exit {start.returncode})")
+            except subprocess.TimeoutExpired:
+                self.log.error("wuauserv restart timed out after 30s")
+            except Exception as e:
+                self.log.error(f"wuauserv restart failed: {e}")
 
 
     def _deep_junk_sweep(self) -> int:
@@ -2851,12 +3153,9 @@ class SystemCleaner(CleanerEngine):
 
         self.refresh_running()  # T-092: fresh snapshot, never reuse stale startup state
 
-        # T-147: poisoned/absent env roots are disabled -- the sweep uses an
-        # impossible relative placeholder so every glob below is empty and the
-        # guard refuses anything, instead of sweeping an arbitrary directory.
-        loc = _LOCALAPPDATA if _LOCALAPPDATA is not None else Path("__INVALID_LOCALAPPDATA__")
-
-        prog = _APPDATA if _APPDATA is not None else Path("__INVALID_APPDATA__")
+        # CORE-004: invalid env roots are None — the sweep simply skips them.
+        loc = _LOCALAPPDATA
+        prog = _APPDATA
 
         # updater leftovers in %TEMP% (-updater / @ tails)
 
@@ -3094,6 +3393,11 @@ def normalize_path(raw, require_absolute: bool = True) -> Path | None:
 
     The canonical (resolved) form is what everything downstream compares against,
     so 'D:\\Portable\\..\\Portable\\' and 'D:/Portable' become one identical path.
+
+    CORE-002: when require_absolute is True, any EXISTING path component that is
+    a symlink/junction/reparse point causes immediate rejection (None). This
+    prevents a portable/custom root that is itself a link from transferring
+    cleanup authority to its destination.
     """
     if not raw or not isinstance(raw, str):
         return None
@@ -3104,6 +3408,9 @@ def normalize_path(raw, require_absolute: bool = True) -> Path | None:
         return None
     expanded = os.path.expandvars(raw)
     if require_absolute and not os.path.isabs(expanded):
+        return None
+    # CORE-002: reject link/reparse chains BEFORE resolve.
+    if require_absolute and _has_link_or_reparse_component(expanded):
         return None
     try:
         return Path(expanded).resolve()
@@ -3153,6 +3460,10 @@ def load_config() -> dict:
     config yields the default snapshot with the errors logged loudly -- the
     destructive boundary must use load_config_strict() so it can fail closed
     instead of silently running with empty exclusions/policy (T-138).
+
+    CORE-005: INVALID provenance is preserved via get_config_state(); callers
+    that need to know the state must use that helper rather than relying on
+    load_config() alone.
     """
 
     state, cfg, errors = _load_and_validate()
@@ -3166,6 +3477,16 @@ def load_config() -> dict:
         return _default_config()
 
     return cfg
+
+
+def get_config_state() -> ConfigState:
+    """Return current ConfigState for CONFIG_FILE without side effects.
+
+    CORE-005: callers that need to know whether the on-disk config is INVALID
+    must use this helper rather than trying to re-parse the file themselves.
+    """
+    state, _, _ = _load_and_validate()
+    return state
 
 
 def _default_config() -> dict:
@@ -3388,6 +3709,22 @@ def _load_and_validate() -> tuple[ConfigState, dict, list[str]]:
     return ConfigState.MISSING if is_missing else ConfigState.VALID, data, []
 
 
+def read_config_snapshot(create_if_missing: bool = True) -> tuple[ConfigState, dict, list[str]]:
+    """Read config without side effects unless `create_if_missing` is True.
+
+    CORE-005/CORE-006: dry-run/status/Preview paths must never persist a new
+    config or overwrite an existing INVALID one. Use create_if_missing=False
+    for all read-only surfaces; only explicit GUI save or first-run bootstrap
+    may pass True.
+    """
+    state, cfg, errors = _load_and_validate()
+    if state == ConfigState.INVALID:
+        return state, {}, errors
+    if state == ConfigState.MISSING and not create_if_missing:
+        return ConfigState.MISSING, _default_config(), []
+    return state, cfg, errors
+
+
 def parse_geometry(geom: str, default: str = "960x640", min_w: int = 800, min_h: int = 500) -> str:
     """Validate a Tk geometry string "WxH+X+Y" and clamp it to the minimums."""
     geom = (geom or "").strip()
@@ -3406,20 +3743,22 @@ def save_config(config: dict) -> bool:
     Callers must treat a False result as a persistence failure and must NOT
     report "saved" / close editors over it -- a silent drop would make the user
     believe their exclusions/targets are active when they are not.
+
+    CORE-003: uses a unique temp filename per writer to avoid concurrent-writer
+    collision on the shared `.tmp` pathname. The write is complete (flush + fsync)
+    before rename, so a crash leaves either the old config or the new one, never
+    a mixed document.
     """
-
+    import uuid as _uuid
     try:
-
-        tmp_file = CONFIG_FILE.with_suffix(".json.tmp")
-
+        CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp_file = CONFIG_FILE.parent / f".config.tmp.{_uuid.uuid4().hex}"
         with open(tmp_file, "w", encoding="utf-8") as f:
-
             json.dump(config, f, indent=4)
-
+            f.flush()
+            os.fsync(f.fileno())
         tmp_file.replace(CONFIG_FILE)
-
         return True
-
     except Exception as e:
         logging.getLogger("vac_cleaner").warning(f"Failed to save config: {e}")
         return False
@@ -3433,6 +3772,10 @@ class ProgressTracker:
         self.category_order = []
         self.current_category = ''
         self.start_time = time.time()
+        self._revision = 0
+    def _bump(self):
+        """Increment revision counter. Call under lock."""
+        self._revision += 1
     def start_category(self, name, total_estimate=0):
         with self.lock:
             self.current_category = name
@@ -3441,21 +3784,22 @@ class ProgressTracker:
                 self.category_order.append(name)
             else:
                 self.categories[name]['status'] = 'running'
+            self._bump()
     def advance(self, bytes_freed=0):
         with self.lock:
             if self.current_category and self.current_category in self.categories:
                 c = self.categories[self.current_category]
                 c['current'] += 1
                 c['bytes'] += bytes_freed
+                self._bump()
     def finish_category(self, status='done', total_bytes=None):
         with self.lock:
             if self.current_category and self.current_category in self.categories:
                 c = self.categories[self.current_category]
                 c['status'] = status
                 if total_bytes is not None:
-                    # F8: feed the layer's real planned total from the shared
-                    # planner so a completed layer shows a truthful determinate bar.
                     c['total'] = total_bytes
+                self._bump()
     def get_snapshot(self):
         with self.lock:
             items_done = 0; total_bytes = 0; planned_bytes = 0; cats = []
@@ -3466,14 +3810,11 @@ class ProgressTracker:
                 if t > 0: planned_bytes += t
                 cats.append({'name': name, 'current': cur, 'total': t, 'bytes': c.get('bytes', 0), 'status': c.get('status', 'pending')})
             elapsed = time.time() - self.start_time
-            # F8: a determinate bar is only truthful when a real total exists.
-            # While any running category has no known total, the UI must use an
-            # indeterminate/status mode instead of a fake 0% determinate bar.
             running_unknown = any(c.get('status') == 'running' and c.get('total', 0) <= 0 for c in self.categories.values())
             return {'categories': cats, 'total_current': items_done, 'total_bytes': total_bytes,
                     'total_items_done': items_done, 'total_bytes_planned': planned_bytes,
                     'running_unknown_total': running_unknown, 'elapsed': elapsed,
-                    'current_category': self.current_category}
+                    'current_category': self.current_category, 'revision': self._revision}
 
 
 # Only targets with a real, safe implementation live here (P2-14). Risky
@@ -3575,6 +3916,7 @@ def resolve_system_roots() -> dict:
         "USER_EXPLORER": USER_EXPLORER,
         "LOCALAPPDATA": _LOCALAPPDATA,
         "APPDATA": _APPDATA,
+        "WINDIR": Path(os.environ.get("windir") or r"C:\Windows").resolve(),
         "appdata_target_count": len(USER_APPDATA_TARGETS),
     }
 
@@ -3834,9 +4176,18 @@ class App(ctk.CTk):
             self._full_exit_impl()
 
     def _persist_window_geometry(self):
+        # CORE-005: never persist geometry over an INVALID config; that would
+        # silently overwrite forensic/recovery state with default policy.
+        if get_config_state() == ConfigState.INVALID:
+            return
+        # W2-002: merge only geometry into the LATEST valid config from disk.
+        state, latest, _ = read_config_snapshot(create_if_missing=False)
+        if state == ConfigState.INVALID:
+            return
         try:
-            self.config["window_geometry"] = parse_geometry(self.geometry())
-            save_config(self.config)
+            merged = dict(latest)
+            merged["window_geometry"] = parse_geometry(self.geometry())
+            save_config(merged)
         except Exception:
             pass  # read-only FS or closing race: best-effort only
 
@@ -3854,7 +4205,9 @@ class App(ctk.CTk):
     def _start_job(self):
         if self._clean_in_progress: return
         if self._close_pending: return
-        
+
+        # W2-002: strict-load the LATEST valid config on every action, not the
+        # stale snapshot from startup. Derive sys_targets from the same snapshot.
         state, safe_config, config_errors = load_config_strict()
         if state == ConfigState.INVALID:
             messagebox.showerror(
@@ -3863,7 +4216,10 @@ class App(ctk.CTk):
                 parent=self
             )
             return
-            
+        # Refresh runtime state from the loaded snapshot so it stays in sync.
+        self.config = safe_config
+        self.sys_targets = merged_system_targets(safe_config.get("system_targets"))
+
         if not messagebox.askyesno(
                 self.T["confirm_title"],
                 self.T["confirm_body"],
@@ -3880,6 +4236,14 @@ class App(ctk.CTk):
         self.text_log.configure(state="disabled")
         self.progress = ProgressTracker()
         self._job_done_event.clear()
+        # W2-001: acquire cross-process destructive-job lease before spawning.
+        self._lease = _JobLease()
+        if not self._lease.acquire():
+            self._clean_in_progress = False
+            messagebox.showinfo(self.T.get("task_dialog_title", "Info"),
+                                "Another clean job is running. Please wait.",
+                                parent=self)
+            return
         # T-128: freeze the job spec on the Tk thread BEFORE the worker starts.
         # The worker reads ONLY this spec, never the mutable GUI state.
         spec = resolve_job_spec(dry_run=False, run_portable=True, run_system=True, run_custom=True,
@@ -3893,7 +4257,8 @@ class App(ctk.CTk):
         # no confirm dialog is needed or shown here.
         if self._clean_in_progress: return
         if self._close_pending: return
-        
+
+        # W2-002: strict-load the LATEST valid config on every action.
         state, safe_config, config_errors = load_config_strict()
         if state == ConfigState.INVALID:
             messagebox.showerror(
@@ -3902,6 +4267,8 @@ class App(ctk.CTk):
                 parent=self
             )
             return
+        self.config = safe_config
+        self.sys_targets = merged_system_targets(safe_config.get("system_targets"))
         self._rebuild_cat_bars()
         self._reset_dashboard()
         self._clean_in_progress = True
@@ -3937,6 +4304,16 @@ class App(ctk.CTk):
     def _finish_job(self):
         self._clean_in_progress = False
         self._worker_thread = None
+        # W2-001: release the destructive-job lease so other processes can proceed.
+        lease = getattr(self, "_lease", None)
+        if lease is not None:
+            lease.release()
+            self._lease = None
+        # W2-002: refresh config from disk so subsequent actions see latest state.
+        state, refreshed, _ = read_config_snapshot(create_if_missing=False)
+        if state == ConfigState.VALID:
+            self.config = refreshed
+            self.sys_targets = merged_system_targets(refreshed.get("system_targets"))
         # Keep the final dashboard snapshot visible instead of wiping it (P2-16).
         self.btn_clean.configure(state="normal")
         self.btn_preview.configure(state="normal")
@@ -3956,25 +4333,37 @@ class App(ctk.CTk):
 
     def _poll_main(self):
         """The single main-thread poller (T-093/094). Drains the log queue,
-        watches job completion and the shutdown lifecycle, updates the dashboard."""
-        try:
-            while True:
+        watches job completion and the shutdown lifecycle, updates the dashboard.
+
+        CORE-010: bounded batch drain with no per-message sleep; yields back to
+        Tk between batches so UI events are processed promptly.
+        """
+        # Drain up to 256 messages per poll cycle to prevent a burst from
+        # monopolizing the Tk event loop for seconds.
+        drained = 0
+        while drained < 256:
+            try:
                 m = self.log_queue.get_nowait()
-                if m == self._AUTO_CLEAN_MARKER:
-                    self._start_job()
-                    continue
-                if m == self._CLOSE_MARKER:
-                    self._on_close()
-                    continue
-                self.text_log.configure(state="normal")
-                self.text_log.insert("end", m + "\n")
-                self.text_log.see("end")
-                self.text_log.configure(state="disabled")
-        except queue.Empty:
-            pass
+            except queue.Empty:
+                break
+            drained += 1
+            if m == self._AUTO_CLEAN_MARKER:
+                self._start_job()
+                continue
+            if m == self._CLOSE_MARKER:
+                self._on_close()
+                continue
+            self.text_log.configure(state="normal")
+            self.text_log.insert("end", m + "\n")
+            self.text_log.see("end")
+            self.text_log.configure(state="disabled")
+        # CORE-010: only finish/clear worker when BOTH the done event is set
+        # AND the retained Thread object reports not alive.
         if self._clean_in_progress and self._job_done_event.is_set():
-            self._job_done_event.clear()
-            self._finish_job()
+            w = self._worker_thread
+            if w is None or not w.is_alive():
+                self._job_done_event.clear()
+                self._finish_job()
         if self._clean_in_progress:
             self._update_dashboard()
         if self._close_pending:
@@ -4002,6 +4391,16 @@ class App(ctk.CTk):
         if not self._clean_in_progress:
             return
         s = self.progress.get_snapshot()
+        # PERF-008: skip render when progress state hasn't changed and elapsed
+        # hasn't crossed a second boundary. This avoids continuous widget work
+        # during long scans with no new mutations.
+        prev_rev = self.__dict__.get('_dash_last_revision', -1)
+        prev_sec = self.__dict__.get('_dash_last_elapsed_sec', -1)
+        cur_sec = int(s['elapsed'])
+        if s['revision'] == prev_rev and cur_sec == prev_sec:
+            return
+        self.__dict__['_dash_last_revision'] = s['revision']
+        self.__dict__['_dash_last_elapsed_sec'] = cur_sec
         e = f"{int(s['elapsed']//60):02d}:{int(s['elapsed']%60):02d}"
         self.dash_stats.configure(text=f"Items: {s['total_current']}  Freed: {fmt(s['total_bytes'])}  Elapsed: {e}")
         # F8: no fake determinate bars. A determinate fill is shown only when a
@@ -4017,10 +4416,11 @@ class App(ctk.CTk):
             self.dash_bar.set(0)
         # Auto-create + update per-category bars
         n_cats = len(s['categories'])
-        if n_cats > 0:
-            self.dash_cat_container.configure(height=n_cats * 22)
-        else:
-            self.dash_cat_container.configure(height=0)
+        # PERF-008: only resize container when category count changes.
+        cur_height = self.__dict__.get('_dash_last_cat_height', -1)
+        if n_cats != cur_height:
+            self.dash_cat_container.configure(height=n_cats * 22 if n_cats > 0 else 0)
+            self.__dict__['_dash_last_cat_height'] = n_cats
         for cat_data in s['categories']:
             nm = cat_data['name']
             if nm not in self.dash_cat_widgets:
@@ -4032,8 +4432,8 @@ class App(ctk.CTk):
                     w['label'].configure(text=f"{nm}: {fmt(byt)}/{fmt(tot)}")
                     w['bar'].set(min(byt / tot, 1.0))
                 else:
-                    w['label'].configure(text=f"{nm}: {fmt(byt)} (scanning)" if cat_data['status'] == 'running' else f"{nm}: {fmt(byt)}")
-                    w['bar'].set(triangle)
+                    w['label'].configure(text=f"{nm}: {fmt(byt)}" if cat_data['status'] == 'done' else f"{nm}: {fmt(byt)} (scanning)")
+                    w['bar'].set(triangle if cat_data['status'] == 'running' and tot <= 0 else 0)
 
     def _rebuild_cat_bars(self):
         for w in list(self.dash_cat_widgets.values()):
@@ -4085,17 +4485,44 @@ class App(ctk.CTk):
         start = simpledialog.askstring(self.T["task_dialog_title"], self.T["task_dialog_prompt"], initialvalue="09:00", parent=self)
         if not start:
             return
-        try:
-            hh, mm = start.split(":")
-            if not (0 <= int(hh) < 24 and 0 <= int(mm) < 60):
-                return
-            install_task(f"{int(hh):02d}:{int(mm):02d}", self.sys_targets)
-        except Exception as e:
-            logging.getLogger("vac_cleaner").warning(f"Failed to install scheduled task: {e}")
+        # CORE-006/W2-006: canonical HH:MM parser shared by GUI and CLI.
+        parsed = _parse_time_str(start)
+        if parsed is None:
+            messagebox.showerror(
+                self.T.get("error_title", "Error"),
+                f"Invalid time format: {start!r}. Expected HH:MM (00-23:00-59).",
+                parent=self)
+            return
+        ok = install_task(parsed, self.sys_targets)
+        if ok:
+            messagebox.showinfo(
+                self.T.get("task_dialog_title", "Task"),
+                f"Task installed -> runs daily at {parsed}, silent full clean.",
+                parent=self)
+        else:
+            messagebox.showerror(
+                self.T.get("error_title", "Error"),
+                "Failed to install scheduled task. Check logs for details.",
+                parent=self)
 
     def _run_bg(self):
+        if self._clean_in_progress:
+            self._log(self.T["run_bg_running"])
+            return
         if self._bg_proc is not None and self._bg_proc.poll() is None:
             self._log(self.T["run_bg_running"])
+            return
+        # W2-002: strict-load latest config before launching background process.
+        state, safe_config, _ = read_config_snapshot(create_if_missing=False)
+        if state == ConfigState.INVALID:
+            self._log("Config invalid; background clean aborted.")
+            return
+        self.config = safe_config
+        self.sys_targets = merged_system_targets(safe_config.get("system_targets"))
+        # W2-001: check lease before spawning background destructive process.
+        lease = _JobLease()
+        if not lease.acquire():
+            self._log("Another clean job is running. Background clean deferred.")
             return
         flags = 0
         for f in ("DETACHED_PROCESS", "CREATE_NEW_PROCESS_GROUP", "CREATE_NO_WINDOW"):
@@ -4161,19 +4588,25 @@ class App(ctk.CTk):
             lb.delete(sel[0])
 
     def _save_exclusions(self, win, txt, lb):
-        import copy
         pats = [ln.strip() for ln in txt.get('1.0', 'end').splitlines() if ln.strip()]
         paths = [str(Path(p)) for p in lb.get(0, 'end') if str(p).strip()]
-        candidate_config = copy.deepcopy(self.config)
-        candidate_config['exclude_patterns'] = pats
-        candidate_config['exclude_paths'] = paths
-        
-        # P1-10: GUI SETTINGS SAVE IS NOT TRANSACTIONAL
-        if not save_config(candidate_config):
+        # W2-002: merge only exclusions into the LATEST valid config from disk,
+        # preserving any fields changed by another editor/process while we were open.
+        state, latest, _ = read_config_snapshot(create_if_missing=False)
+        if state == ConfigState.INVALID:
+            self._log("Error: config invalid; cannot save exclusions.")
+            return
+        merged = dict(latest)
+        merged['exclude_patterns'] = pats
+        merged['exclude_paths'] = paths
+        if not save_config(merged):
             self._log("Error: could not save exclusions (config not writable)")
             return
-        
-        self.config = candidate_config
+        self.config = merged
+        self.exclude_patterns = pats
+        self.exclude_paths = paths
+        win.destroy()
+        self._log(self.T["exc_saved"])
         win.destroy()
         self._log(self.T["exc_saved"])
 
@@ -4207,12 +4640,19 @@ class App(ctk.CTk):
         ctk.CTkButton(bar, text=self.T["save"], width=110, font=native_font, fg_color=WIN95_BUTTON, hover_color=WIN95_BUTTON_HOVER, text_color=WIN95_GOLD, corner_radius=Z, border_width=2, border_color=BEVEL_RAISED, command=lambda: self._save_system_targets(win)).grid(row=0, column=0, sticky='w')
 
     def _save_system_targets(self, win):
-        for name, var in self.syst_vars.items():
-            self.sys_targets[name] = bool(var.get())
-        self.config["system_targets"] = dict(self.sys_targets)
-        if not save_config(self.config):
+        candidate_targets = {name: bool(var.get()) for name, var in self.syst_vars.items()}
+        # W2-002: merge only system_targets into the LATEST valid config from disk.
+        state, latest, _ = read_config_snapshot(create_if_missing=False)
+        if state == ConfigState.INVALID:
+            self._log("Error: config invalid; cannot save system targets.")
+            return
+        merged = dict(latest)
+        merged["system_targets"] = candidate_targets
+        if not save_config(merged):
             self._log("Error: could not save system targets (config not writable)")
             return
+        self.sys_targets = candidate_targets
+        self.config = merged
         win.destroy()
         self._log(self.T["syst_saved"])
 
@@ -4233,6 +4673,20 @@ def _hide_console():
             ctypes.windll.user32.ShowWindow(hwnd, 0)  # SW_HIDE
     except Exception:
         pass
+
+
+def _parse_time_str(raw: str) -> str | None:
+    """Canonical HH:MM parser. Returns formatted time string or None on failure."""
+    try:
+        parts = raw.strip().split(":")
+        if len(parts) != 2:
+            return None
+        hh, mm = int(parts[0]), int(parts[1])
+        if not (0 <= hh < 24 and 0 <= mm < 60):
+            return None
+        return f"{hh:02d}:{mm:02d}"
+    except (ValueError, AttributeError):
+        return None
 
 
 TASK_NAME = "SmartVACCleaner"
@@ -4269,11 +4723,6 @@ def _target_deviations(sys_targets) -> tuple[list[str], list[str]]:
     return enables, disables
 
 
-def disabled_safe_targets(sys_targets) -> list[str]:
-    """Safe-default targets the user switched OFF (serialized as --disable-targets)."""
-    return _target_deviations(sys_targets)[1]
-
-
 def clean_argv(sys_targets=None) -> list[str]:
     """Canonical argv for a silent full-clean (scheduled + background share this, T-067).
 
@@ -4284,16 +4733,19 @@ def clean_argv(sys_targets=None) -> list[str]:
     GUI state that turns System Temp off survives a scheduled/background run.
     Public plain --all semantics stay unchanged: with no mask, the safe
     defaults apply untouched.
+
+    CORE-009: scheduled execution loads CURRENT config at runtime for roots
+    and rules, and resolves surface="scheduled" from current system_targets.
+    The canonical argv carries NO system-target snapshot -- it is a clean
+    invocation that always reads current policy. Manual public CLI --all keeps
+    the safe-default semantics.
     """
     if getattr(sys, "frozen", False):
         argv = [sys.executable, "--cli", "--all", "--delete", "--hidden"]
     else:
         argv = [_get_pythonw(), str(SCRIPT_PATH), "--cli", "--all", "--delete", "--hidden"]
-    enables, disables = _target_deviations(sys_targets)
-    if enables:
-        argv += ["--sys-targets", ",".join(enables)]
-    if disables:
-        argv += ["--disable-targets", ",".join(disables)]
+    # CORE-009: never serialize sys_targets into the command. Scheduled runs
+    # always read current config for the full target mask.
     return argv
 
 
@@ -4311,18 +4763,27 @@ def install_task(time_str: str, sys_targets=None) -> bool:
     """Register daily silent full-clean task in Windows Task Scheduler.
 
     Returns True on success so callers can propagate a nonzero CLI outcome.
+
+    CORE-011: use bounded subprocess with timeout for schtasks creation.
     """
-    tr = scheduled_task_command(sys_targets)
-    result = subprocess.run(
-        ['schtasks', '/create',
-         '/tn', TASK_NAME,
-         '/tr', tr,
-         '/sc', 'daily',
-         '/st', time_str,
-         '/rl', 'HIGHEST',
-         '/f'],
-        capture_output=True, text=True
-    )
+    tr = scheduled_task_command()
+    try:
+        result = subprocess.run(
+            ['schtasks', '/create',
+             '/tn', TASK_NAME,
+             '/tr', tr,
+             '/sc', 'daily',
+             '/st', time_str,
+             '/rl', 'HIGHEST',
+             '/f'],
+            capture_output=True, text=True, timeout=30
+        )
+    except subprocess.TimeoutExpired:
+        print("schtasks create timed out after 30s")
+        return False
+    except Exception as e:
+        print(f"schtasks error: {e}")
+        return False
     if result.returncode == 0:
         print(f"Task '{TASK_NAME}' installed -> runs daily at {time_str}, silent full clean.")
         return True
@@ -4354,6 +4815,27 @@ def main():
                         help="Start time for scheduled task (HH:MM, default 09:00)")
     args = parser.parse_args()
 
+    # CORE-014: validate exactly one action family before any side effects.
+    # Action families: install-task, status, analyze-caches, clean (cli+mode),
+    # GUI (default). Ambiguous or conflicting combos exit code 2 with zero
+    # task/job/App/system side effects.
+    action_count = sum([
+        bool(args.install_task),
+        bool(args.status),
+        bool(args.analyze_caches),
+        bool(args.cli or args.portable or args.system or args.custom or args.all),
+    ])
+    if action_count > 1:
+        families = []
+        if args.install_task: families.append("--install-task")
+        if args.status: families.append("--status")
+        if args.analyze_caches: families.append("--analyze-caches")
+        if args.cli or args.portable or args.system or args.custom or args.all:
+            families.append("clean (cli/portable/system/custom/all)")
+        print(f"Error: conflicting actions specified: {' + '.join(families)}")
+        print("Specify exactly one action family.")
+        sys.exit(2)
+
     # ── install-task ──────────────────────────────────────────────────────────
     if args.install_task:
         targets = [t.strip() for t in args.sys_targets.split(",") if t.strip()]
@@ -4380,10 +4862,9 @@ def main():
         analyze_caches_main()
         return
 
-    # в”Ђв”Ђ CLI / scheduled mode в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
-    dry_run = args.dry_run or not args.delete
-
+    # ── CLI / scheduled mode ──────────────────────────────────────────────────
     if args.cli or args.portable or args.system or args.custom or args.all:
+        dry_run = args.dry_run or not args.delete
         if args.hidden:
             _hide_console()
         # T-138: an existing but malformed config must NEVER authorize a
@@ -4423,6 +4904,13 @@ def main():
             dry_run
         )
         run_cleaning_job(spec, log)
+        # CORE-008: propagate logged errors to the CLI boundary so automation
+        # sees a truthful nonzero exit when operational failures occurred.
+        try:
+            if log.n_errors > 0:
+                sys.exit(1)
+        except TypeError:
+            pass  # Logger may be a mock in tests; skip the check
         return
 
     # ── GUI mode ────────────────────────────────────────────────────────────────

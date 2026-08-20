@@ -16,7 +16,25 @@ jobs:
 
       - name: Install deps
         run: |
-          pip install -r requirements.txt pyinstaller
+          pip install -r requirements.txt pytest ruff pyinstaller
+
+      - name: Lint (CORE-013: release prerequisite)
+        run: ruff check _SMART_VAC_CLEANER.py test_cleaner.py
+
+      - name: Tests (CORE-013: release prerequisite)
+        run: pytest -q
+
+      - name: Package smoke (CORE-013: release prerequisite)
+        run: python test_package_install.py
+
+      - name: Version equality check (CORE-013)
+        run: |
+          $pyproject_ver = (Select-String -Path pyproject.toml -Pattern '^version = ').Line.Split('"')[1]
+          $script_ver = (Select-String -Path _SMART_VAC_CLEANER.py -Pattern '^VERSION = ').Line.Split('"')[1]
+          $tag_ver = $env:GITHUB_REF.Substring(10)
+          Write-Host "pyproject=$pyproject_ver script=$script_ver tag=$tag_ver"
+          if ($pyproject_ver -ne $script_ver) { throw "pyproject.version != VERSION" }
+          if ($tag_ver -ne "v$pyproject_ver") { throw "tag != v{pyproject.version}: tag=$tag_ver expected=v$pyproject_ver" }
 
       - name: Build exe
         run: |
