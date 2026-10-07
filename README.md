@@ -1,15 +1,23 @@
+<div align="center">
+
 # Smart VAC Cleaner
 
-[English](README.md) · [Русский](README.ru.md) · [Eesti](README.et.md) · [Дед](README.ded.md)
+**Portable Windows junk cleaner with a dry-run-first CLI, guarded deletion rules, GUI controls, and scheduled cleanup.**
 
-![Smart VAC Cleaner GUI](assets/screenshot.png)
+![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0078D4?style=flat-square)
+![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?style=flat-square&logo=python&logoColor=white)
+[![Releases](https://img.shields.io/github/v/release/vacterro/SMART-VAC-CLEANER?style=flat-square&label=release)](https://github.com/vacterro/SMART-VAC-CLEANER/releases)
+[![License](https://img.shields.io/github/license/vacterro/SMART-VAC-CLEANER?style=flat-square)](LICENSE)
 
-Portable, safe, modern junk cleaner for Windows. GUI + CLI + Task Scheduler.
+[**Download releases**](https://github.com/vacterro/SMART-VAC-CLEANER/releases) · [Safety](#safety-defense-in-depth) · [CLI](#cli) · [Issues](https://github.com/vacterro/SMART-VAC-CLEANER/issues)
 
-Safe by default: dry-run unless you say `--delete`. All candidate portable
-roots are always listed in the config; only roots that actually exist on the
-current machine are swept, and only known junk patterns inside them.
-Missing drives are silently skipped, never errors.
+<img src="assets/screenshot.png" alt="Smart VAC Cleaner GUI" width="860">
+
+**English** · [Русский](README.ru.md) · [Eesti](README.et.md) · [Дед](README.ded.md)
+
+</div>
+
+Safe by default: the CLI is a read-only preview unless `--delete` is supplied. Missing portable roots are skipped instead of treated as failures, and destructive work stays behind explicit safety gates.
 
 ## What it cleans
 
