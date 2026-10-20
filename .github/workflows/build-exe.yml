@@ -38,11 +38,11 @@ jobs:
 
       - name: Build exe
         run: |
-          python -m PyInstaller --onefile --console --clean --noconfirm --name SmartVACCleaner --collect-data customtkinter --add-data "strings;strings" _SMART_VAC_CLEANER.py
+          .\build_exe.ps1 -Python python -SkipDependencyInstall
 
       - name: Smoke test
         run: |
-          .\dist\SmartVACCleaner.exe --status | Select-Object -First 2
+          python test_frozen_exe.py dist/SmartVACCleaner.exe
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

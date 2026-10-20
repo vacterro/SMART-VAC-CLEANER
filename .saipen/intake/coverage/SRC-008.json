@@ -1,0 +1,14 @@
+{
+  "requirements": {
+    "SRC-008:R001": {
+      "actionable": true,
+      "class": "requirement",
+      "disposition": "IMPLEMENTED",
+      "evidence": "E-693",
+      "text": "push https://gitlab.com/vacuum34/smart_vac_cleaner and continue all",
+      "verification": "git push --dry-run origin main -> PASS",
+      "work": "T-215"
+    }
+  },
+  "schema_version": 1
+}

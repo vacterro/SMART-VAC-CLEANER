@@ -1,0 +1,14 @@
+{
+  "requirements": {
+    "SRC-007:R001": {
+      "actionable": true,
+      "class": "requirement",
+      "disposition": "VERIFIED",
+      "evidence": "T-214 closed with verification evidence in LOG: verify -> PASS [target: T-214] conf: high -- test_cleanup_rules_t213 + test_cleaner targeted; ruff clean; package smoke ok",
+      "text": "T-213 cleanup safety: stale directory with fresh content unsafe deletion repair",
+      "verification": "the Work this request created reached its own verification gate; see the T-214 VERIFY cycle in .saipen/LOG.md",
+      "work": "T-214"
+    }
+  },
+  "schema_version": 1
+}

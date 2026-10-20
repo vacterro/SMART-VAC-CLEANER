@@ -1,0 +1,14 @@
+{
+  "clauses": {
+    "SRC-008:R001": {
+      "actionable": true,
+      "class": "requirement",
+      "text": "push https://gitlab.com/vacuum34/smart_vac_cleaner and continue all"
+    }
+  },
+  "derived_at": "2026-10-20T20:29:32Z",
+  "derived_from": "SRC-008",
+  "interpretation_revision": 1,
+  "schema_version": 1,
+  "source_sha256": "e06581052bd71f9851feb3dd4751b91b9a86b925bb48fa0f3f4a0a1cb0f6079e"
+}

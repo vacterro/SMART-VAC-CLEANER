@@ -1,5 +1,9 @@
 # Smart VAC Cleaner
 
+**v2.6.10**
+
+![Version](https://img.shields.io/badge/version-2.6.10-F0D060?style=flat-square)
+
 [English](README.md) · [Русский](README.ru.md) · [Eesti](README.et.md) · [Дед](README.ded.md)
 
 ![Smart VAC Cleaner GUI](assets/screenshot.png)
@@ -26,6 +30,7 @@
 - **Симлинки идут лесом**; `..` канонизируется, итоговый путь сидит внутри своего корня и перепроверяется — наружу не выпустим.
 - **Никогда не сносим**: `login data`, `bookmarks`, `cookies`, `database` и т.д.
 - **Исключения**: `exclude_patterns` / `exclude_paths` в конфиге.
+- **Бэкапы**: обычные `.bak`-файлы отката (типа `app.asar.bak`) автоматом не трогаем.
 - Всё идёт через `SafetyGuard`; ошибки считаем, но не падаем.
 
 ## Че надо
@@ -114,28 +119,34 @@ python _SMART_VAC_CLEANER.py --install-task --time 09:00
 Вшивает задачу `SmartVACCleaner` (высшие права, скрыто). Снести задачу:
 
 ```bat
-schtasks /Delete /TN SmartVACCleaner /F
+python _SMART_VAC_CLEANER.py --uninstall-task
 ```
+
+Сносит и базовую `SmartVACCleaner`, и юзерскую `SmartVACCleaner_<USERNAME>`, если такая встала.
 
 ## Конфиг
 
-`cleaner_config.json` сам создастся рядом со скриптом (или exe) при первом запуске. Все пути нормализуются: слеши, `..`, защитные блеклисты (C:\, Windows, профиль) — всё проверяется. Пример:
+`cleaner_config.json` создаётся с дефолтами, когда поднимается GUI или впервые идёт реальное удаление. Исходники и портативный exe держат его рядом с приложением; поставленный wheel пишет в `%LOCALAPPDATA%\SmartVACCleaner` (`SMARTVAC_DATA_DIR` перебивает путь). Read-only превью и `--status` отсутствующий конфиг не создают. Логи запусков — `logs\clean_YYYYMMDD_HHMMSS.log` там же, последние 14 штук. Все пути нормализуются: слеши, `..`, защитные блеклисты (C:\, Windows, профиль) — всё проверяется. Пример:
 
 ```json
 {
-  "portable_roots": ["D:\\Portable"],
+  "portable_roots": [],
   "custom_rules": [{"path": "D:\\Apps\\TestApp", "pattern": "*.log"}],
   "exclude_patterns": ["*.db"],
   "exclude_paths": ["C:\\Users\\me\\AppData\\Local\\Important"],
   "auto_clean_interval_hours": 0,
-  "lang": "en"
+  "lang": "en",
+  "window_geometry": "",
+  "system_targets": {}
 }
 ```
 
 - `portable_roots`: папки, внутри которых ищем мусорные шаблоны (Cache, Temp, Logs). Остальное не трогаем.
 - `custom_rules`: `path` (папка) + `pattern` (маска, `*` = всё).
 - `exclude_patterns` / `exclude_paths`: что не трогать.
+- `auto_clean_interval_hours`: автопереуборка GUI, `0` = off.
 - `lang`: язык — `en` (дефолт), `ru`, `et`, `ded`. Файлики `strings/*.json` лежат рядом (или вшиты в exe). Кинь свой `<lang>.json`, чтоб добавить.
+- `system_targets`: галочки диалога System Targets; `window_geometry`: последний размер/место окна.
 
 ## Тесты
 
@@ -154,4 +165,4 @@ python -m pytest -q
 - Для планировщика нужны права админа (`/rl HIGHEST`).
 - Портабельные папки на других дисках чистятся и без админа (схема VAC).
 - Утилита не от вендоров; пути собраны руками, проги сами их пересоздадут.
-<!-- source-digest: README.md sha256:a15dfad98946adc2 -->
+<!-- source-digest: README.md sha256:985cd37683a869ea119a10cc0d142a330462d1ffda197a8fafe0590fdec2d019 -->

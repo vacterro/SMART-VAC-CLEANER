@@ -3,8 +3,8 @@ __pycache__/
 .pytest_cache/
 logs/
 cleaner_config.json
+.cleaner_config.json.lock
 *.bak
-.saipen/
 .venv/
 venv/
 .freebuff/
@@ -12,3 +12,31 @@ venv/
 build/
 dist/
 
+
+/SmartVACCleaner.exe
+
+.workbuddy-ai/
+
+.saiwork/
+
+# SAIPEN canonical state. The release machinery commits the identity carrier,
+# the canonical closure files (STATE/BOARD/LOG/digest/release receipt), the
+# source-authority receipts and the release scope records, so those stay
+# trackable. Every other .saipen/ path stays machine-local.
+.saipen/*
+!.saipen/IDENTITY.md
+!.saipen/STATE.md
+!.saipen/BOARD.md
+!.saipen/LOG.md
+!.saipen/intake/
+!.saipen/archive/
+.saipen/archive/*
+!.saipen/archive/source/
+!.saipen/kitchen/
+.saipen/kitchen/*
+!.saipen/kitchen/digest.md
+!.saipen/kitchen/release_receipt.json
+!.saipen/kitchen/release_scope/
+!.saipen/logs/
+.saipen/logs/*
+!.saipen/logs/LOG-*.md

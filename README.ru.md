@@ -1,5 +1,9 @@
 # Smart VAC Cleaner
 
+**v2.6.10**
+
+![Version](https://img.shields.io/badge/version-2.6.10-F0D060?style=flat-square)
+
 ![Интерфейс Smart VAC Cleaner](assets/screenshot.png)
 
 Портативный, безопасный, современный очиститель мусора для Windows. GUI + CLI + Планировщик задач.
@@ -14,7 +18,7 @@
 | Слой | Что | Где |
 |---|---|---|
 | Система | Temp, дампы падений, миниатюры Проводника, кэш обновлений Windows, кэш DNS, корзина, 100+ пользовательских кэшей приложений (браузеры, кэши Node/uv/pip, семейство VS Code, Eagle, OBS, Discord...) | `%TEMP%`, `%LOCALAPPDATA%`, `%APPDATA%` |
-| Deep C: Junk | Остатки апдейтеров, `*.exe.tmp`, Viber QmlWebCache, резервные копии Яндекс.Диска, логи ODIS, `app.asar.bak` и подобное | `%LOCALAPPDATA%`, `%TEMP%` |
+| Deep C: Junk | Остатки апдейтеров, `*.exe.tmp`, Viber QmlWebCache, логи Яндекс.Диска, логи ODIS и подобный мусор | `%LOCALAPPDATA%`, `%TEMP%` |
 | Портативные корни | Известные мусорные паттерны внутри настроенных корней | `portable_roots` в конфиге |
 | Пользовательские правила | Свои пути + glob-паттерны | `custom_rules` в конфиге |
 
@@ -27,6 +31,7 @@
 - **Симлинки и `..`**: симлинки отклоняются; сегменты `..` канонизируются, а итоговый путь ограничивается корнем цели и перепроверяется — `..`, выводящий за пределы корня, отклоняется
 - **Never-delete имена**: `login data`, `bookmarks`, `cookies`, `database` и т.п.
 - **Исключения**: `exclude_patterns` / `exclude_paths` в конфиге
+- **Бэкапы**: обычные `.bak`-артефакты отката (например, `app.asar.bak`) никогда не удаляются автоматически
 - Каждое удаление проходит через `SafetyGuard` своего корня; ошибки считаются, никогда не фатальны
 
 ## Требования
@@ -126,13 +131,21 @@ python _SMART_VAC_CLEANER.py --install-task --time 09:00
 Устанавливает задачу `SmartVACCleaner` (макс. права, скрытое окно). Удаление:
 
 ```bat
-schtasks /Delete /TN SmartVACCleaner /F
+python _SMART_VAC_CLEANER.py --uninstall-task
 ```
+
+Команда снимает и базовую задачу `SmartVACCleaner`, и пользовательскую
+`SmartVACCleaner_<USERNAME>`, если установилась она.
 
 ## Конфигурация
 
-`cleaner_config.json` автоматически создаётся рядом со скриптом (или exe)
-при первом запуске, с дефолтами. Все пути в нём канонизируются при загрузке:
+`cleaner_config.json` создаётся с дефолтами, когда стартует GUI или впервые
+запускается реальное удаление. Исходники и портативный exe держат его рядом с
+приложением; установленный wheel пишет в `%LOCALAPPDATA%\SmartVACCleaner`
+(`SMARTVAC_DATA_DIR` переопределяет путь). Read-only превью и `--status`
+отсутствующий конфиг не создают. Логи запусков лежат в
+`logs\clean_YYYYMMDD_HHMMSS.log` в той же папке; хранятся последние 14.
+Все пути в нём канонизируются при загрузке:
 стиль слешей, хвостовые разделители и сегменты `..` нормализуются, дубли
 схлопываются, защищённые пути (`C:\`, Windows, Program Files, профиль,
 собственная папка программы) и вложенные корни отклоняются с предупреждением.
@@ -140,19 +153,23 @@ schtasks /Delete /TN SmartVACCleaner /F
 
 ```json
 {
-  "portable_roots": ["D:\\Portable"],
+  "portable_roots": [],
   "custom_rules": [{"path": "D:\\Apps\\TestApp", "pattern": "*.log"}],
   "exclude_patterns": ["*.db"],
   "exclude_paths": ["C:\\Users\\me\\AppData\\Local\\Important"],
-  "auto_clean_interval_hours": 0
-  "lang": "en"
+  "auto_clean_interval_hours": 0,
+  "lang": "en",
+  "window_geometry": "",
+  "system_targets": {}
 }
 ```
 
 - `portable_roots`: папки, чьи известные мусорные подпапки выметаются (например, `Cache`, `Temp`, `Logs`, нумерованные резервные копии). Всё, что не подходит под мусорные паттерны, не трогается.
 - `custom_rules`: `path` (папка) + `pattern` (glob, `*` = всё содержимое).
 - `exclude_patterns` / `exclude_paths`: дополнительные запретные списки.
+- `auto_clean_interval_hours`: интервал авто-переуборки GUI; `0` = off.
 - `lang`: язык интерфейса — `en` (по умолчанию), `ru`, `et`, `ded`. Встроенные `strings/*.json` лежат рядом со скриптом (или вшиты в exe); добавьте свой `<lang>.json`, чтобы добавить язык.
+- `system_targets`: выбор per-target on/off из диалога System Targets; `window_geometry`: последний размер/позиция окна GUI.
 
 ## Тесты
 
@@ -167,4 +184,4 @@ python -m pytest -q
 - Установка задачи Планировщика требует прав администратора (`/rl HIGHEST`).
 - Портативные корни на несистемных дисках чистятся и без админа (схема VAC).
 - Проект не аффилирован ни с одним вендором; все пути — известные кэш/лог-каталоги приложений, которые они пересоздают.
-<!-- source-digest: README.md sha256:a15dfad98946adc2 -->
+<!-- source-digest: README.md sha256:985cd37683a869ea119a10cc0d142a330462d1ffda197a8fafe0590fdec2d019 -->

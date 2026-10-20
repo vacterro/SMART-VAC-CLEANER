@@ -1,0 +1,14 @@
+{
+  "requirements": {
+    "SRC-002:R001": {
+      "actionable": true,
+      "class": "requirement",
+      "disposition": "IMPLEMENTED",
+      "evidence": "README.ru/et/ded/ja/md live fixes: JSON examples valid, portable_roots [] documented, .bak rollback protection, --uninstall-task guidance aligned, config-creation/storage text reconciled; .saipen/kitchen/release_scope/T-200.json 19/19 sha256 match",
+      "text": "Documentation fixes: fix malformed JSON in README.ru.md and README.et.md; reconcile configuration-creation and storage descriptions across all languages; align the documented portable_roots default with the implementation default ([]); reconcile app.asar.bak claims with the .bak rollback protection; align task uninstall guidance across languages; add automated validation that every README JSON example parses and matches implementation defaults",
+      "verification": "python -m pytest test_cleaner.py::TestDocExamples -q = 14 passed PASS; python -m pytest test_audit_acceptance.py -q = 131 passed PASS",
+      "work": "T-200"
+    }
+  },
+  "schema_version": 1
+}

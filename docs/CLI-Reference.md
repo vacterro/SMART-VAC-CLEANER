@@ -17,6 +17,7 @@ Add `--delete` to actually remove files. `--dry-run` forces preview even when
 | `--exclude` | Comma list of extra exclude patterns (`--exclude "*.db,*.tmp"`) |
 | `--hidden` | Hide console window (used by Task Scheduler) |
 | `--install-task` | Register the daily silent full-clean task |
+| `--uninstall-task` | Deregister the daily task (both task names) |
 | `--time HH:MM` | Start time for the scheduled task (default `09:00`) |
 
 Examples:
@@ -41,11 +42,15 @@ REM daily silent task at 09:00
 python _SMART_VAC_CLEANER.py --install-task --time 09:00
 ```
 
-Task removal:
+Task removal (removes both names, machine-wide `SmartVACCleaner` and the
+per-user `SmartVACCleaner_<USERNAME>` variant):
 
 ```bat
-schtasks /Delete /TN SmartVACCleaner /F
+python _SMART_VAC_CLEANER.py --uninstall-task
 ```
+
+`--disable-targets` and `--surface` are internal flags used by the scheduled
+surface; the public surface is the table above.
 
 After a `pip install .`, the same commands work as `vac-cleaner ...`.
 The standalone exe supports the identical flags: `SmartVACCleaner.exe --all --delete`.

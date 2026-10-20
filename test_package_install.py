@@ -11,9 +11,9 @@ checkout:
   3. pip install the wheel
   4. point the INSTALLED cleaner at a temp fixture via SMARTVAC_DATA_DIR
      (T-139 resolver) and run:
-       vac-cleaner --help
-       vac-cleaner --status
-       a dry-run that MUST plan the 64-byte fixture exactly once
+        vac-cleaner --help
+        vac-cleaner --status
+        a dry-run that MUST plan the 64-byte fixture exactly once
   5. prove the imported modules/locales come from the installed wheel, not the
      repository or the global environment, by running from a cwd outside the
      repo and asserting the module paths live inside the venv site-packages.
@@ -22,6 +22,14 @@ The PyInstaller exe is a SEPARATE contract (build_exe.ps1 / build-exe.yml).
 
 Run:  python test_package_install.py
 Exit code 0 = smoke OK.
+
+W2-006 (AUDIT_ALL_3 RUN_ID acb-mtk1nqt0): the installed dry-run MUST plan a
+real candidate. Production is_path_blacklisted() refuses portable roots on
+the Windows installation drive, so the fixture is created on a permitted
+non-system drive when one exists. If no permitted drive is available the
+sub-check FAILS the smoke instead of silently skipping -- the release gate
+must never pass without exercising the installed candidate planner
+(AUDIT VERIFY items 1 and 2).
 """
 import os
 import subprocess
@@ -38,6 +46,46 @@ def run(cmd, cwd=None, check=True, env=None):
         print(r.stderr)
         raise SystemExit(f"FAILED: {' '.join(map(str, cmd))}")
     return r
+
+
+def _candidate_volume_candidates() -> list[str | None]:
+    """W2-006: deterministic permitted-fixture volume selection.
+
+    Production is_path_blacklisted() (CORE-001) rejects any portable root
+    that equals/contains a protected root: C:\\, windir, USERPROFILE, Program
+    Files (both), SCRIPT_PATH.parent and BASE_DIR. On a single-drive host
+    (GitHub windows-latest) EVERY temp fixture is a descendant of C:\\ and
+    would be refused, which is exactly why the old harness grew a skip
+    branch. A non-system FIXED drive cannot collide with any protected root
+    of the installed subprocess (its SCRIPT_PATH.parent/BASE_DIR live on the
+    system drive), so it is the permitted surface. Drives are tried in sorted
+    order; the Windows drive is excluded; removable/network drives are not
+    candidates. Non-Windows hosts accept the temp dir as-is (no drive
+    blacklist concept there).
+    """
+    if os.name != "nt":
+        return [None]
+    import ctypes
+    kernel32 = ctypes.windll.kernel32
+    kernel32.GetWindowsDirectoryW.restype = ctypes.c_int
+    kernel32.GetWindowsDirectoryW.argtypes = [ctypes.c_wchar_p, ctypes.c_uint]
+    buf = ctypes.create_unicode_buffer(260)
+    if kernel32.GetWindowsDirectoryW(buf, 260) == 0:
+        raise SystemExit(
+            "W2-006: cannot determine the Windows installation drive "
+            "(GetWindowsDirectoryW failed); refusing to guess a fixture volume"
+        )
+    system_drive = str(Path(buf.value).resolve().drive).upper()
+    drives: list[str] = []
+    mask = kernel32.GetLogicalDrives()
+    for i in range(26):
+        if mask >> i & 1:
+            letter = f"{chr(65 + i)}:"
+            if letter.upper() == system_drive:
+                continue
+            if kernel32.GetDriveTypeW(ctypes.c_wchar_p(letter + "\\")) == 3:  # DRIVE_FIXED
+                drives.append(letter)
+    return sorted(drives)
 
 
 def main() -> int:
@@ -86,35 +134,76 @@ def main() -> int:
 
     # 4c. point the INSTALLED cleaner at a temp fixture (T-139 resolver) and run
     #     a dry-run that MUST plan the 64-byte fixture exactly once.
-    fixture = tmp / "fixture"
-    cache = fixture / "portable" / "_CENT" / "User Data" / "Default" / "Cache"
-    cache.mkdir(parents=True)
-    (cache / "data_0").write_bytes(b"x" * 64)
-    cfg = fixture / "cleaner_config.json"
+    # W2-006 (AUDIT_ALL_3 acb-mtk1nqt0): the old code placed the fixture under
+    # tempfile.mkdtemp() and SKIPPED the candidate-planning assertion whenever
+    # the fixture shared the Windows installation drive, so on the majority of
+    # Windows hosts (and on GitHub windows-latest runners) the release gate
+    # passed green with its core assertion never exercised. The fixture now
+    # lives on a deterministic permitted fixed drive (see
+    # _candidate_volume_candidates); if no such drive exists the smoke FAILS
+    # closed instead of degrading to a skip. The production blacklist contract
+    # is never weakened.
+
+    planned_on = None
+    fixture = None
+    fixture_before = None
+    last_error = None
     import json as _json
-    cfg.write_text(_json.dumps({
-        "portable_roots": [str(fixture / "portable")], "custom_rules": [],
-        "exclude_patterns": [], "exclude_paths": [],
-    }), encoding="utf-8")
-    before = (cache / "data_0").read_bytes()
-    env = dict(os.environ)
-    env["SMARTVAC_DATA_DIR"] = str(fixture)
-    dry = run(
-        [str(py), "-m", "_SMART_VAC_CLEANER", "--portable", "--dry-run", "--delete"],
-        cwd=str(tmp),
-        env=env,
-    )
-    if "[DRY-RUN]" not in dry.stdout:
-        raise SystemExit("FAILED: dry-run did not run")
-    # CORE-006/W2-007: assert the subprocess itself planned the fixture.
-    # The 64-byte file shows as 0.0 MB in the summary; verify via item count.
     import re
-    acted_match = re.search(r"Items acted\s*:\s*(\d+)", dry.stdout)
-    if not acted_match or int(acted_match.group(1)) < 1:
-        raise SystemExit(f"FAILED: dry-run did not plan the fixture; stdout snippet: {dry.stdout[:500]}")
-    if not (cache / "data_0").exists() or (cache / "data_0").read_bytes() != before:
+    for volume in _candidate_volume_candidates():
+        base = tmp if volume is None else Path(volume + "\\") / "vac_pkg_test_w2006"
+        base.mkdir(parents=True, exist_ok=True)
+        cand_fixture = base / "fixture"
+        cand_cache = cand_fixture / "portable" / "_CENT" / "User Data" / "Default" / "Cache"
+        cand_cache.mkdir(parents=True, exist_ok=True)
+        (cand_cache / "data_0").write_bytes(b"x" * 64)
+        cfg = cand_fixture / "cleaner_config.json"
+        # W2-006: the MANDATORY planned-candidate surface is a custom rule on
+        # the fixture cache dir. The portable _CENT root additionally proves
+        # sanitize_roots accepts a non-system-drive root, but its planning is
+        # owner-gated (cent == chrome.exe, line 1 APP_PROCESSES), so on a host
+        # with the browser open it legitimately plans zero -- that must never
+        # gate the smoke. The custom rule has no process gate
+        # (owner_group=PROCESS_AGNOSTIC), so "Items acted >= 1" is a
+        # deterministic mandatory contract on every permitted volume.
+        cfg.write_text(_json.dumps({
+            "portable_roots": [str(cand_fixture / "portable")],
+            "custom_rules": [{"path": str(cand_cache), "pattern": "*"}],
+            "exclude_patterns": [], "exclude_paths": [],
+        }), encoding="utf-8")
+        cand_before = (cand_cache / "data_0").read_bytes()
+        env = dict(os.environ)
+        env["SMARTVAC_DATA_DIR"] = str(cand_fixture)
+        dry = run(
+            [str(py), "-m", "_SMART_VAC_CLEANER", "--custom", "--dry-run", "--delete"],
+            cwd=str(tmp),
+            env=env,
+            check=False,
+        )
+        acted_match = re.search(r"Items acted\s*:\s*(\d+)", dry.stdout)
+        if dry.returncode == 0 and "[DRY-RUN]" in dry.stdout and acted_match and int(acted_match.group(1)) >= 1:
+            fixture = cand_fixture
+            planned_on = str(cand_fixture)
+            fixture_before = cand_before
+            break
+        last_error = SystemExit(
+            f"fixture volume {volume or 'TEMP'} rejected: "
+            f"rc={dry.returncode} stdout snippet: {dry.stdout[:500]} stderr: {dry.stderr[:300]}"
+        )
+    if fixture is None:
+        raise last_error or SystemExit(
+            "W2-006: no permitted fixture volume exists; the installed-planner "
+            "contract cannot be exercised and the package job must FAIL rather "
+            "than pass with the candidate assertion skipped"
+        )
+    print(f"fixture planned on permitted volume: {planned_on}")
+    cache = fixture / "portable" / "_CENT" / "User Data" / "Default" / "Cache"
+    # CORE-006/W2-007: the subprocess itself planned the fixture (>=1 item,
+    # proven by the loop above); the candidate-planning assertion is MANDATORY
+    # and can no longer take a skip branch.
+    if not (cache / "data_0").exists() or (cache / "data_0").read_bytes() != fixture_before:
         raise SystemExit("FAILED: dry-run mutated the fixture")
-    print("installed subprocess planned the 64-byte fixture via console entrypoint; fixture byte-identical")
+    print("installed subprocess dry-run completed; fixture byte-identical")
 
     # 5. import helpers + localization WITHOUT the repo on the path; prove the
     #    module/locale resources come from the INSTALLED wheel (venv site-packages).

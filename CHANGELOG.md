@@ -1,5 +1,17 @@
 # Changelog
 
+## 2.6.10
+- Isolate the test suite from real user data: no test resolves the operator's system roots, config file or run logs, and a session tripwire fails any real deletion outside a disposable fixture.
+- Refuse redirected log directories during retention and log creation, preserving files outside the application data boundary.
+- Report hard directory I/O failures as operational errors and return a nonzero CLI status while preserving refused paths.
+- Report partial scheduled-task removal as failure; distinguish absent tasks from access-denied, timeout and other scheduler errors using HRESULT exit codes.
+- Revalidate configured roots without following replacement junctions, preserve protected subtrees independently of preflight, and keep nested mutation boundaries local to each worker.
+- Keep read-only config consumers write-free; serialize writes across processes, validate merged policy before persistence, and preserve invalid config for recovery.
+- Use a deployment-independent Windows mutex, Unicode process enumeration, truthful busy exit codes, bounded service calls, and live fail-closed Windows Update authorization.
+- Bound GUI telemetry and planning memory, retain critical diagnostics and shutdown controls, keep one auto-clean timer owner, and prevent policy edits during active jobs.
+- Use prefix-indexed candidate claims and exclusions; prune verified dedicated-owner discovery roots and bound unknown discovery. Disabled custom rules remain inactive.
+- Validate CLI modifier ownership before side effects, align scheduled/background policy with current config, and verify wheel and frozen executable behavior.
+
 ## v2.6.9
 - **Triple-wave audit (CORE-001..014, W2-001..008, PERF-001..008)**: P0 security fixes — root-identity TOCTOU (identity fingerprint + ino reuse blocked), symlink/junction rejection before resolve, invalid env roots stay None end-to-end, INVALID config preserved (no overwrite on close), read-only config snapshot for dry-run/status, concurrent future errors escalate to ERROR, operational failures (DNS/RecycleBin/wuauserv) escalated from warning to error, canonical scheduled argv without stale target mask, _poll_main checks thread death not just event, schtasks/net start bounded timeouts, CLI validates exactly one action family. P1 stability — cross-process destructive-job lease via Windows named mutex, GUI strict-loads latest config per action with field-level merge on persistence, save_config uses unique temp+fsync per writer, Logger mkdir failure degrades to console-only, Windows Update derives from trusted WINDIR snapshot, canonical HH:MM parser, test_package_install asserts fixture bytes via subprocess. P2 performance — CandidateLedger batched scope when no prior claims exist, Toolhelp32Snapshot native process enum (zero tasklist subprocesses), deque.popleft for Universal Sweeper BFS, opt-in deleted_paths for production Logger, ProgressTracker revision cache avoids redundant repaint. 288 tests green, ruff clean, package smoke PASS.
 

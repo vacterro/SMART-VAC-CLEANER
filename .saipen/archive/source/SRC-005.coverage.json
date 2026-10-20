@@ -1,0 +1,14 @@
+{
+  "requirements": {
+    "SRC-005:R001": {
+      "actionable": true,
+      "class": "requirement",
+      "disposition": "VERIFIED",
+      "evidence": "T-212 closed with verification evidence in LOG: verify -> PASS [target: T-212] conf: high -- pytest test_logger_isolation.py: 11 passed, 2 skipped, 0 failed; full suite: 633 passed, 17 skipped",
+      "text": "fix logger instance isolation (P2) and invalid dir_f keyword (P3) in _SMART_VAC_CLEANER.py",
+      "verification": "the Work this request created reached its own verification gate; see the T-212 VERIFY cycle in .saipen/LOG.md",
+      "work": "T-212"
+    }
+  },
+  "schema_version": 1
+}

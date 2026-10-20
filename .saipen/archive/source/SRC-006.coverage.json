@@ -1,0 +1,14 @@
+{
+  "requirements": {
+    "SRC-006:R001": {
+      "actionable": true,
+      "class": "requirement",
+      "disposition": "VERIFIED",
+      "evidence": "T-213 closed with verification evidence in LOG: verify -> PASS [target: T-213] conf: high -- pytest test_cleanup_rules_t213.py: 6 passed; full suite: 639 passed, 17 skipped exit 0; ruff check . passed",
+      "text": "Add cleanup rules for .tmp.driveupload Google Drive cache,.9router-build,user-root stray node_modules,test sandboxes ctx-fixtures,testfb,CamoSetup,and active system TEMP _TEMP_ test fixtures older than 24h",
+      "verification": "the Work this request created reached its own verification gate; see the T-213 VERIFY cycle in .saipen/LOG.md",
+      "work": "T-213"
+    }
+  },
+  "schema_version": 1
+}

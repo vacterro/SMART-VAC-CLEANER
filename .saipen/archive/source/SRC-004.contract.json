@@ -1,0 +1,14 @@
+{
+  "clauses": {
+    "SRC-004:R001": {
+      "actionable": true,
+      "class": "requirement",
+      "text": "Satisfy the captured request SRC-004 in full; the authoritative text is the receipt body (sha256 7f8bf2607ce5): SAIHANDOFF \u2014 SMART_VAC_CLEANER LOGGER ISOLATION / FINAL TARGETED FIX EXECUTOR: SMART_VAC_CLEANER agent (workbuddy) PROJECT: SMART_VAC_CLEANER v2.6.10 INTENT: Resolve two independently reproduced defects MODE: Normal autonomous continuation\u2026"
+    }
+  },
+  "derived_at": "2026-10-16T23:03:25Z",
+  "derived_from": "SRC-004",
+  "interpretation_revision": 1,
+  "schema_version": 1,
+  "source_sha256": "7f8bf2607ce56614c4f093f9c059d4abd1d388b270b91a722b0c64babbe32674"
+}

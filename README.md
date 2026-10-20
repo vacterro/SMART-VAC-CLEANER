@@ -2,6 +2,10 @@
 
 # Smart VAC Cleaner
 
+**v2.6.10**
+
+![Version](https://img.shields.io/badge/version-2.6.10-F0D060?style=flat-square)
+
 **Portable Windows junk cleaner with a dry-run-first CLI, guarded deletion rules, GUI controls, and scheduled cleanup.**
 
 ![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0078D4?style=flat-square)
@@ -24,7 +28,7 @@ Safe by default: the CLI is a read-only preview unless `--delete` is supplied. M
 | Layer | What | Where |
 |---|---|---|
 | System | Temp, crash dumps, Explorer thumbnails, Windows Update Cache, DNS cache, Recycle Bin, per-user app caches (100+ AppData targets: browsers, Node/uv/pip caches, VS Code family, Eagle, OBS, Discord...) | `%TEMP%`, `%LOCALAPPDATA%`, `%APPDATA%` |
-| Deep C: Junk | Updater leftovers, `*.exe.tmp`, Viber QmlWebCache, Yandex.Disk backups, ODIS logs, app.asar.bak and similar | `%LOCALAPPDATA%`, `%TEMP%` |
+| Deep C: Junk | Updater leftovers, `*.exe.tmp`, Viber QmlWebCache, Yandex.Disk logs, ODIS logs and similar disposable files | `%LOCALAPPDATA%`, `%TEMP%` |
 | Portable roots | Known junk patterns inside portable-app roots you configure | `portable_roots` in config |
 | Custom rules | Your own path + glob pattern rules | `custom_rules` in config |
 
@@ -113,6 +117,7 @@ Add `--delete` to actually remove files. `--dry-run` forces preview even when
 | `--exclude` | Comma list of extra exclude patterns (`--exclude "*.db,*.tmp"`) |
 | `--hidden` | Hide console window (used by Task Scheduler) |
 | `--install-task` | Register the daily silent full-clean task |
+| `--uninstall-task` | Remove the cleaner's base or user-specific scheduled task |
 | `--time HH:MM` | Start time for the scheduled task (default `09:00`) |
 
 Examples:
@@ -143,33 +148,51 @@ python _SMART_VAC_CLEANER.py --install-task --time 09:00
 Installs `SmartVACCleaner` task (highest privileges, hidden window). Uninstall:
 
 ```bat
-schtasks /Delete /TN SmartVACCleaner /F
+python _SMART_VAC_CLEANER.py --uninstall-task
 ```
 
 ## Configuration
 
-`cleaner_config.json` is auto-created next to the script (or next to the exe)
-on first run, with defaults. All paths in it are canonicalized on load:
-slash style, trailing separators and `..` segments are normalized, duplicate
-roots collapse, protected paths (`C:\`, Windows, Program Files, user profile,
-the cleaner's own folder) and nested roots are rejected with a warning.
-Example:
+`cleaner_config.json` is created with defaults only when the GUI starts or a
+real delete job first runs. Read-only CLI previews and status checks leave a
+missing configuration absent — a dry run never writes user data.
+
+Where it lives depends on the deployment:
+
+| Deployment | `cleaner_config.json` and `logs\` |
+|---|---|
+| Source checkout | beside the script |
+| Portable exe (`SmartVACCleaner.exe`) | beside the exe |
+| Installed wheel (`pip install .`) | `%LOCALAPPDATA%\SmartVACCleaner` — never inside site-packages |
+| Any of the above, with `SMARTVAC_DATA_DIR` set | exactly that folder (environment override for tests, CI and unusual deployments) |
+
+Run logs land in `logs\clean_YYYYMMDD_HHMMSS.log` under the same folder, and
+only the newest 14 are kept. All paths in the config are canonicalized on
+load: slash style, trailing separators and `..` segments are normalized,
+duplicate roots collapse, protected paths (`C:\`, Windows, Program Files, user
+profile, the cleaner's own folder) and nested roots are rejected with a
+warning. Example:
 
 ```json
 {
-  "portable_roots": ["D:\\Portable"],
+  "portable_roots": [],
   "custom_rules": [{"path": "D:\\Apps\\TestApp", "pattern": "*.log"}],
   "exclude_patterns": ["*.db"],
   "exclude_paths": ["C:\\Users\\me\\AppData\\Local\\Important"],
   "auto_clean_interval_hours": 0,
-  "lang": "en"
+  "lang": "en",
+  "window_geometry": "",
+  "system_targets": {}
 }
 ```
 
 - `portable_roots`: folders whose known-junk subfolders are swept (pattern-based, e.g. `Cache`, `Temp`, `Logs`, numbered backups). Anything not matching junk patterns is untouched.
 - `custom_rules`: `path` (folder) + `pattern` (glob, `*` = whole contents).
 - `exclude_patterns` / `exclude_paths`: extra no-go lists.
+- `auto_clean_interval_hours`: GUI auto-reclean interval; `0` = off.
 - `lang`: GUI language — `en` (default), `ru`, `et`, `ded`. Built-in `strings/*.json` live next to the script (or bundled into the exe); drop your own `<lang>.json` there to add a language.
+- `system_targets`: per-target on/off choices made in the System Targets dialog (risky opt-ins: Recycle Bin, DNS cache, Windows Update cache).
+- `window_geometry`: last GUI window size/position, restored on start; `""` means the default geometry.
 
 ## Tests
 

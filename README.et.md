@@ -1,5 +1,9 @@
 # Smart VAC Cleaner
 
+**v2.6.10**
+
+![Version](https://img.shields.io/badge/version-2.6.10-F0D060?style=flat-square)
+
 ![Smart VAC Cleaner GUI](assets/screenshot.png)
 
 Kaasaskantav, ohutu, kaasaegne prügipuhastaja Windowsile. GUI + CLI + Tegumihaldur.
@@ -14,7 +18,7 @@ Puuduvad kettad jäetakse vaikselt vahele, vigu ei teki kunagi.
 | Kiht | Mida | Kus |
 |---|---|---|
 | Süsteem | Temp, krahhi-dumbid, Exploreri pisipildid, Windows Update'i vahemälu, DNS-vahemälu, prügikast, 100+ rakenduste vahemälusid (brauserid, Node/uv/pip vahemälud, VS Code pere, Eagle, OBS, Discord...) | `%TEMP%`, `%LOCALAPPDATA%`, `%APPDATA%` |
-| Deep C: Junk | Uuendajate jäänused, `*.exe.tmp`, Viber QmlWebCache, Yandex.Disk varukoopiad, ODIS logid, `app.asar.bak` jms | `%LOCALAPPDATA%`, `%TEMP%` |
+| Deep C: Junk | Uuendajate jäänused, `*.exe.tmp`, Viber QmlWebCache, Yandex.Disk logid, ODIS logid jms | `%LOCALAPPDATA%`, `%TEMP%` |
 | Kaasaskantavad juured | Tuntud prügimustrid seadistatud juurte sees | `portable_roots` konfigis |
 | Kasutaja reeglid | Oma teed + glob-mustrid | `custom_rules` konfigis |
 
@@ -27,6 +31,7 @@ Puuduvad kettad jäetakse vaikselt vahele, vigu ei teki kunagi.
 - **Sümbollingid ja `..`**: sümbollingid lükatakse tagasi; `..` segmendid kanoniseeritakse ning saadud tee piiratakse sihtmärgijuuriga ja kontrollitakse uuesti — juurest välja viiv `..` lükatakse tagasi
 - **Never-delete nimed**: `login data`, `bookmarks`, `cookies`, `database` jne.
 - **Erandid**: `exclude_patterns` / `exclude_paths` konfigis
+- **Varukoopiad**: tavalisi `.bak` tagasipööramise faile (nt `app.asar.bak`) ei kustutata kunagi automaatselt
 - Iga kustutamine läbib oma juure `SafetyGuard`i; vead loendatakse, pole kunagi saatuslikud
 
 ## Nõuded
@@ -126,13 +131,21 @@ python _SMART_VAC_CLEANER.py --install-task --time 09:00
 Paigaldab ülesande `SmartVACCleaner` (maksimaalsed õigused, peidetud aken). Eemaldamine:
 
 ```bat
-schtasks /Delete /TN SmartVACCleaner /F
+python _SMART_VAC_CLEANER.py --uninstall-task
 ```
+
+See eemaldab nii baasülesande `SmartVACCleaner` kui ka kasutajapõhise
+`SmartVACCleaner_<USERNAME>`, kui see paigaldus.
 
 ## Konfiguratsioon
 
-`cleaner_config.json` luuakse automaatselt skripti (või exe) kõrvale esimesel
-käivitamisel, vaikimisi väärtustega. Kõik teed kanoniseeritakse laadimisel:
+`cleaner_config.json` luuakse vaikimisi väärtustega siis, kui GUI käivitub või
+esimest korda jookseb päris kustutamine. Lähtekood ja kaasaskantav exe hoiavad
+seda rakenduse kõrval; paigaldatud wheel kirjutab `%LOCALAPPDATA%\SmartVACCleaner`
+(`SMARTVAC_DATA_DIR` möörab tee). Kirjutuskaitstud eelvaade ja `--status`
+puuduvat konfiguratsiooni ei loo. Käivituse logid asuvad
+`logs\clean_YYYYMMDD_HHMMSS.log` samas kaustas; hoitakse 14 uusimat.
+Kõik teed kanoniseeritakse laadimisel:
 kaldkriipsude stiil, lõpuseparaatorid ja `..` segmendid normaliseeritakse,
 duplikaadid liidetakse, kaitstud teed (`C:\`, Windows, Program Files, profiil,
 programmi enda kaust) ja pesastunud juured lükatakse tagasi hoiatusega.
@@ -140,19 +153,23 @@ Näide:
 
 ```json
 {
-  "portable_roots": ["D:\\Portable"],
+  "portable_roots": [],
   "custom_rules": [{"path": "D:\\Apps\\TestApp", "pattern": "*.log"}],
   "exclude_patterns": ["*.db"],
   "exclude_paths": ["C:\\Users\\me\\AppData\\Local\\Important"],
-  "auto_clean_interval_hours": 0
-  "lang": "en"
+  "auto_clean_interval_hours": 0,
+  "lang": "en",
+  "window_geometry": "",
+  "system_targets": {}
 }
 ```
 
 - `portable_roots`: kaustad, mille tuntud prügialamkaustad pühitakse (nt `Cache`, `Temp`, `Logs`, nummerdatud varukoopiad). Kõik, mis prügimustritele ei sobi, jääb puutumata.
 - `custom_rules`: `path` (kaust) + `pattern` (glob, `*` = kogu sisu).
 - `exclude_patterns` / `exclude_paths`: täiendavad keelatud nimekirjad.
+- `auto_clean_interval_hours`: GUI automaatse taaspuhastuse intervall; `0` = off.
 - `lang`: liidese keel — `en` (vaikimisi), `ru`, `et`, `ded`. Sisseehitatud `strings/*.json` asuvad skripti kõrval (või on exe sisse pakitud); oma keele lisamiseks pane sinna `<lang>.json`.
+- `system_targets`: System Targets dialoogis tehtud sihtkohtade valikud; `window_geometry`: viimane GUI akna suurus ja asukoht.
 
 ## Testid
 
@@ -167,4 +184,4 @@ Töötab võrguühenduseta, puudutab ainult ajutisi katalooge.
 - Tegumihalduri ülesande paigaldamine nõuab administraatori õigusi (`/rl HIGHEST`).
 - Kaasaskantavad juured mittesüsteemsetel ketastel puhastatakse ka ilma adminita (VAC-skeem).
 - Projekt pole seotud ühegi müüjaga; kõik teed on tuntud vahemälu/logikataloogid, mida rakendused taastavad.
-<!-- source-digest: README.md sha256:a15dfad98946adc2 -->
+<!-- source-digest: README.md sha256:985cd37683a869ea119a10cc0d142a330462d1ffda197a8fafe0590fdec2d019 -->

@@ -1,7 +1,21 @@
 # Configuration
 
-`cleaner_config.json` is auto-created next to the script (or next to the exe)
-on first run, with defaults.
+`cleaner_config.json` is written only when the GUI starts or a real delete job
+first runs. A read-only CLI preview or `--status` never creates it: dry runs
+leave a missing configuration absent.
+
+Where it is written depends on the deployment:
+
+| Deployment | `cleaner_config.json` and `logs\` |
+|---|---|
+| Source checkout | beside the script |
+| Portable exe (`SmartVACCleaner.exe`) | beside the exe |
+| Installed wheel (`pip install .`) | `%LOCALAPPDATA%\SmartVACCleaner` — never inside site-packages, which may be read-only or shared |
+| Any of the above with `SMARTVAC_DATA_DIR` set | exactly that folder (override for tests, CI, unusual deployments) |
+
+Run logs go to `logs\clean_YYYYMMDD_HHMMSS.log` under the same folder; only the
+newest 14 are kept (retention runs once per job, and only ever removes the
+cleaner's own `clean_*.log` files from that folder).
 
 ```json
 {
@@ -11,7 +25,8 @@ on first run, with defaults.
   "exclude_paths": ["C:\\Users\\me\\AppData\\Local\\Important"],
   "auto_clean_interval_hours": 0,
   "lang": "en",
-  "window_geometry": ""
+  "window_geometry": "",
+  "system_targets": {}
 }
 ```
 
@@ -31,6 +46,9 @@ on first run, with defaults.
 - `auto_clean_interval_hours` — GUI auto-reclean interval; `0` = off.
 - `lang` — GUI language: `en`, `ru`, `et`, or `ded`; any missing string falls back
   to English. Read at GUI start.
+- `system_targets` — per-target on/off choices made in the System Targets dialog
+  (risky opt-ins: Recycle Bin, DNS Cache, Windows Update Cache); `{}` means
+  defaults. Only consulted for system-target runs, never for portable roots.
 - `window_geometry` — last GUI window size/position, saved on close and
   restored on start; `""` means the default geometry (clamped to a minimum
   of 800x500).
