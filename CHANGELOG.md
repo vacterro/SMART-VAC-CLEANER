@@ -1,5 +1,8 @@
 # Changelog
 
+## 2.6.11 (unreleased — verification pending)
+- **T-216: Google Drive upload staging is no longer auto-deleted.** `.tmp.driveupload` was registered as a destructive target on four roots (user temp, drive temp, `Local\Google\DriveFS`, user profile) with `PROCESS_AGNOSTIC` ownership and no minimum age; the active-marker check only protected very recently modified files, and the drivefs process check treated an UNKNOWN process snapshot as "no drive running". A one-hour-old 19-byte upload fragment under an empty process table was destroyed by a real delete run. Upload completion cannot be established from name, age, or process membership alone, so the fix removes automatic deletion authority structurally: the target is no longer registered anywhere, and the dead drivefs gate was removed with it. A longer age threshold was deliberately not used as the fix. Preservation is identical across GUI, CLI, scheduled, background, dry-run preview and byte accounting, and no reclaimable bytes are advertised for staging data. Regression coverage added for fresh, one-hour-old, multi-day-old, nested and empty staging, an UNKNOWN process snapshot, and a reported-running drivefs process, all asserting zero deletion and zero freed bytes; the older test that asserted unconditional deletion was inverted to assert preservation.
+
 ## 2.6.10
 - Isolate the test suite from real user data: no test resolves the operator's system roots, config file or run logs, and a session tripwire fails any real deletion outside a disposable fixture.
 - Refuse redirected log directories during retention and log creation, preserving files outside the application data boundary.

@@ -3820,11 +3820,13 @@ class SystemCleaner(CleanerEngine):
 
         min_age_24h = 86400
 
-        # T-213 (T-214 repair): Google Drive upload cache. Ownership is the
-        # drivefs process group, so an active Google Drive refuses deletion.
-        # Exact target only: no broad wildcard staging sweep.
-        for r in (user_temp, drive_temp, _rooted(local, "Google", "DriveFS"), user_profile):
-            targets.append((r, ".tmp.driveupload", "Google Drive upload cache", PROCESS_AGNOSTIC))
+        # NOTE: .tmp.driveupload (Google Drive upload staging) is intentionally
+        # NOT registered here. Upload completion cannot be reliably established
+        # from name, age, or process membership alone: an UNKNOWN process
+        # snapshot (None) must not be treated as "no Google Drive running", and
+        # old staging data may still be unsynchronized user content. Automatic
+        # deletion authority is removed for all roots (temp, drive temp, Local
+        # Google\DriveFS, profile). See ticket T-215 / T-216.
 
         # T-213 (T-214 repair): 9router build cache. Narrowed to the exact
         # build root; active work is refused by freshness + lock checks below.
@@ -3883,12 +3885,6 @@ class SystemCleaner(CleanerEngine):
                         if pattern.startswith("pytest-") and any("pytest" in str(p) for p in (self.running or ())):
                             self.log.skipped(candidate, "pytest worker running; not authorized")
                             continue
-                        # Active Google Drive staging is never erased by name alone.
-                        if pattern == ".tmp.driveupload":
-                            drive_procs = APP_PROCESSES.get("drivefs", ())
-                            if any(proc in (self.running or ()) for proc in drive_procs):
-                                self.log.skipped(candidate, "Google Drive is running; upload staging not authorized")
-                                continue
                         # Owner gate shared by dry-run and delete (candidate truth).
                         if owner not in (None, PROCESS_AGNOSTIC) and not self._owner_gate_ok(owner):
                             self.log.skipped(candidate, f"'{owner}' running or unknown; not authorized")

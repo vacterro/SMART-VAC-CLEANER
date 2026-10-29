@@ -50,13 +50,22 @@ def isolated_roots(tmp_path):
     return roots
 
 
-def _make_cleaner(roots):
-    log = vac.Logger(log_file=None, dry_run=False)
-    return vac.SystemCleaner(False, log, system_roots=roots)
+def _make_cleaner(roots, dry_run=False):
+    log = vac.Logger(log_file=None, dry_run=dry_run)
+    return vac.SystemCleaner(dry_run, log, system_roots=roots)
 
 
-def test_tmp_driveupload_cache_cleaned(isolated_roots):
-    """Rule 1: .tmp.driveupload Google Drive cache in temp, drive temp, appdata, and user profile."""
+@pytest.mark.parametrize("running", [None, set(), {"drivefs.exe"}])
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_tmp_driveupload_cache_preserved(isolated_roots, monkeypatch, running, dry_run):
+    """Rule 1 (T-216 corrected): .tmp.driveupload Google Drive upload staging is
+    NEVER auto-deleted, regardless of age, process snapshot, or root location.
+
+    Upload completion is UNKNOWN; old staging may hold unsynchronized user data.
+    All four registered roots are covered: user temp, drive temp, Local
+    Google\\DriveFS, and user profile.
+    """
+    monkeypatch.setattr(vac, "get_running_processes", lambda: running)
     u_temp = isolated_roots["USER_TEMP"]
     d_temp = isolated_roots["DRIVE_TEMP"]
     prof = isolated_roots["USERPROFILE"]
@@ -85,14 +94,46 @@ def test_tmp_driveupload_cache_cleaned(isolated_roots):
     target_dir3.mkdir()
     os.utime(target_dir3, (old_time, old_time))
 
-    cleaner = _make_cleaner(isolated_roots)
+    nested = target_dir1 / "upload.part"
+    nested.write_bytes(b"partial")
+    os.utime(nested, (old_time, old_time))
+
+    empty_staging = u_temp / ".tmp.driveupload_empty"
+    empty_staging.mkdir()
+
+    cleaner = _make_cleaner(isolated_roots, dry_run=dry_run)
     freed = cleaner._deep_junk_sweep()
 
-    assert not target_dir1.exists()
-    assert not target_file1.exists()
-    assert not target_dir2.exists()
-    assert not target_dir3.exists()
-    assert freed > 0
+    assert target_dir1.exists()
+    assert (target_dir1 / "chunk.bin").exists()
+    assert target_file1.exists()
+    assert target_dir2.exists()
+    assert (target_dir2 / "sub.dat").exists()
+    assert target_dir3.exists()
+    assert nested.exists()
+    assert empty_staging.exists()
+    assert freed == 0, "No upload staging bytes may be reclaimed automatically"
+
+
+def test_tmp_driveupload_preserved_when_drivefs_running(isolated_roots, monkeypatch):
+    """T-216: even when drivefs process enumeration fails/returns UNKNOWN,
+    staging data survives; when drivefs IS reported running, still survives.
+    This closes the UNKNOWN-process-snapshot-as-no-drive regression.
+    """
+    monkeypatch.setattr(vac, "get_running_processes", lambda: {"drivefs.exe"})
+    u_temp = isolated_roots["USER_TEMP"]
+    old_time = time.time() - 90000
+    staging = u_temp / ".tmp.driveupload"
+    staging.mkdir()
+    (staging / "upload.part").write_bytes(b"frag")
+    os.utime(staging / "upload.part", (old_time, old_time))
+    os.utime(staging, (old_time, old_time))
+
+    cleaner = _make_cleaner(isolated_roots)
+    freed = cleaner._deep_junk_sweep()
+    assert staging.exists()
+    assert (staging / "upload.part").exists()
+    assert freed == 0
 
 
 def test_9router_build_cache_cleaned(isolated_roots):
